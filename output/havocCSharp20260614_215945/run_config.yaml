@@ -1,0 +1,157 @@
+ai:
+  anthropic:
+    model: claude-3-opus-20240229
+    temperature: 0.7
+  gemini:
+    available_models:
+    - models/gemini-2.5-flash
+    - models/gemini-2.5-pro
+    - models/gemini-flash-latest
+    - models/gemini-1.5-pro-latest
+    - models/gemini-2.5-pro-latest
+    - models/gemini-3.1-pro
+    max_tokens: 65535
+    model: models/gemini-2.5-pro
+    temperature: 0.8
+  openai:
+    model: gpt-4
+    temperature: 0.7
+  provider: gemini
+  rate_limit_wait_seconds: 5
+behavior_rules:
+  directory: ./windowsBehaviorRules
+  enabled: true
+compiler:
+  guidelines:
+    csharp:
+    - Use standard C# patterns and avoid unsafe code unless explicitly required.
+    python:
+    - Ensure 64-bit compatibility. The shellcode is x64. When using ctypes on 64-bit
+      Windows, you MUST explicitly define `.argtypes` and `.restype` (e.g., `ctypes.wintypes.HMODULE`,
+      `ctypes.c_void_p`) for all Windows APIs to prevent 64-bit pointers from being
+      truncated to 32-bit integers.
+    - Always cast memory addresses to `ctypes.c_void_p()` before passing them to Windows
+      APIs like `VirtualProtect` to avoid pointer truncation.
+    - Do not print raw bytes or parsed memory strings (like PE section names) to the
+      console to avoid UnicodeEncodeError on Windows.
+  language: csharp
+  mingw:
+    path: C:\mingw64\bin\gcc.exe
+  msvc:
+    vcvars_path: C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat
+  output_dir: ./output
+  type: msvc
+detectors:
+  defender:
+    check_interval: 20
+    enabled: true
+  elastic:
+    api_key_id: MZrIdp4BsPH-MU2ESBw-
+    api_key_secret: YVTX04x7ZLmJg9MBDjQ_DQ
+    check_interval: 5
+    host: my-security-project-f1f4b5.es.us-central1.gcp.elastic.cloud
+    index_pattern: .alerts-security.alerts-*
+    max_checks: 5
+    password: ''
+    port: 443
+    use_ssl: true
+    username: ''
+    verify_certs: true
+  enabled:
+  - elastic
+  - defender
+evasion_techniques:
+  memory:
+  - description: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly.
+      The simplest and most straightforward method of running shellcode.
+    enabled: true
+    name: rwx_allocation
+    trigger: PAGE_EXECUTE_READWRITE memory permitted
+  - description: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect
+      to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    enabled: true
+    name: RW_to_RX
+    trigger: RWX memory detected, PAGE_EXECUTE_READWRITE allocation
+  - description: 'Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll),
+      locate executable section, overwrite with shellcode. Uses existing executable
+      memory.'
+    enabled: false
+    name: module_stomping
+    trigger: unbacked memory execution, private memory execution, process creation
+      via shellcode
+  - description: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly
+      monitored by EDR.
+    enabled: true
+    name: heap_execution
+    trigger: VirtualAlloc/VirtualAllocEx detection
+  - description: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute
+      shellcode in fiber context.
+    enabled: true
+    name: fiber_execution
+    trigger: thread creation detection
+  - description: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections
+      as executable. Advanced evasion.
+    enabled: true
+    name: phantom_dll_hollowing
+    trigger: module load detection, image section modification
+  - description: Overwrite the return address on the stack or use synthetic frames
+      to hide the true origin of the execution (e.g., hiding the pointer to unbacked
+      memory).
+    enabled: true
+    name: thread_stack_spoofing
+    trigger: Stack walking, ETW ThreadStart, GetThreadContext calls
+  - description: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in
+      legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
+    enabled: false
+    name: proxy_function_calls
+    trigger: Direct syscall detection, RIP auditing
+  - description: Create file transaction, write shellcode, rollback transaction but
+      keep section handle. Execute from transacted memory.
+    enabled: false
+    name: process_doppelganging
+    trigger: file-based detection, process creation monitoring
+  - description: Use legitimate callback functions (EnumWindows, EnumSystemLocales,
+      etc.) with shellcode address.
+    enabled: false
+    name: callback_execution
+    trigger: direct thread creation, CreateThread detection
+  - description: Map same DLL twice - once legitimate, once modified. Use legitimate
+      handle for cover.
+    enabled: false
+    name: module_overloading
+    trigger: module integrity checks
+  - description: Split shellcode across multiple small allocations. Reconstruct at
+      runtime. Evades signature scanning.
+    enabled: false
+    name: scattered_allocation
+    trigger: large memory allocation, shellcode signatures
+  - description: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler
+      to execute. Very stealthy.
+    enabled: false
+    name: read_only_trick
+    trigger: executable memory allocation
+  preferred_techniques: []
+execution:
+  max_iterations: 15
+  sandbox_mode: true
+  success_criteria:
+    enabled: true
+    file:
+      path: ''
+    network:
+      host: 10.0.1.101
+      port: 80
+      timeout: 15
+    process:
+      name: CalculatorApp.exe
+      timeout: 15
+    type: network
+  wait_after_execute: 150
+output:
+  diff_format: unified
+  history_file: ./output/history.json
+  loader_dir: ./output/loaders
+web:
+  debug: false
+  host: 127.0.0.1
+  port: 5000

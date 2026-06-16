@@ -1,0 +1,15 @@
+SUCCESS: True
+OUTPUT: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_133929\iter_1\loader_1.exe
+
+--- STDOUT ---
+Initializing Visual Studio environment...
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.6.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Compiling...
+loader_1.c
+Compilation successful!
+
+--- STDERR ---

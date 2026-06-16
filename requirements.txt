@@ -1,0 +1,20 @@
+# AI Providers
+google-generativeai>=0.4.0
+langchain>=0.1.0
+langchain-google-genai>=0.0.1
+langgraph>=0.0.1
+
+# HTTP & API
+requests>=2.31.0
+elasticsearch>=8.11.0
+flask>=3.0.0
+
+# Configuration
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+tomli>=2.0.1
+
+# Utilities
+diff-match-patch>=20230430
+colorama>=0.4.6
+rich>=13.7.0

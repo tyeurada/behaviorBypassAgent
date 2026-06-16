@@ -1,0 +1,167 @@
+Starting Evasive AI Agent...
+Shellcode: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\calc.bin
+Max Iterations: 3
+Output Directory: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706
+
+--- Agent Loop Started ---
+
+--- Generate Code (Iteration 1) ---
+  [DEBUG] invoking LLM for code generation...
+  [DEBUG] LLM response received.
+  [DEBUG] Finish Reason: STOP
+  [DEBUG] Safety Ratings: []
+  [DEBUG] Raw Content Type: str
+  [DEBUG] Raw Content Length: 6865
+  [DEBUG] Normalized Content Length: 6865
+--- Compile Code ---
+--- Execute Code ---
+
+[EXECUTOR DEBUG]
+  Executable: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_1\loader_1.exe
+  Shellcode:  C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\calc.bin
+  Command:    C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_1\loader_1.exe C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\calc.bin
+  Working dir: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_1
+  Full command: ['C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\output\\20260611_110706\\iter_1\\loader_1.exe', 'C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\tests\\calc.bin']
+
+  Process started: PID=7412
+--- Check Detections ---
+Checking detections iteration 1/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-11T02:05:07.801884 to 2026-06-11T02:10:07.801884 (300s)
+  Process filter: loader_1.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_1\loader_1.exe
+  Smart filtering: True
+[Elastic] 1 alert(s) found
+
+  Alert #1:
+    Rule: Malicious Behavior Prevention Alert: Potential Process Creation via ShellCode
+    Process name: calc.exe
+    Process exe: C:\Windows\System32\calc.exe
+    Parent: loader_1.exe
+  [Alert] Rule ID: 58b996a5-634c-4205-9ffa-a6f2b8ebc1ad
+--- Analyze Results ---
+--- Record History ---
+--- Generate Code (Iteration 2) ---
+  [DEBUG] invoking LLM for code generation...
+  [DEBUG] LLM response received.
+  [DEBUG] Finish Reason: STOP
+  [DEBUG] Safety Ratings: []
+  [DEBUG] Raw Content Type: str
+  [DEBUG] Raw Content Length: 6944
+  [DEBUG] Normalized Content Length: 6944
+--- Compile Code ---
+--- Execute Code ---
+
+[EXECUTOR DEBUG]
+  Executable: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_2\loader_2.exe
+  Shellcode:  C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\calc.bin
+  Command:    C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_2\loader_2.exe C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\calc.bin
+  Working dir: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_2
+  Full command: ['C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\output\\20260611_110706\\iter_2\\loader_2.exe', 'C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\tests\\calc.bin']
+
+  Process started: PID=16740
+--- Check Detections ---
+Checking detections iteration 1/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-11T02:08:20.746093 to 2026-06-11T02:13:20.746093 (300s)
+  Process filter: loader_2.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_2\loader_2.exe
+  Smart filtering: True
+[Elastic] 1 alert(s) found
+
+  Alert #1:
+    Rule: Malicious Behavior Prevention Alert: Potential Process Creation via ShellCode
+    Process name: calc.exe
+    Process exe: C:\Windows\System32\calc.exe
+    Parent: loader_2.exe
+  [Alert] Rule ID: 58b996a5-634c-4205-9ffa-a6f2b8ebc1ad
+--- Analyze Results ---
+--- Record History ---
+--- Generate Code (Iteration 3) ---
+  [DEBUG] invoking LLM for code generation...
+  [DEBUG] LLM response received.
+  [DEBUG] Finish Reason: STOP
+  [DEBUG] Safety Ratings: []
+  [DEBUG] Raw Content Type: str
+  [DEBUG] Raw Content Length: 12301
+  [DEBUG] Normalized Content Length: 12301
+--- Compile Code ---
+--- Execute Code ---
+
+[EXECUTOR DEBUG]
+  Executable: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe
+  Shellcode:  C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\calc.bin
+  Command:    C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\calc.bin
+  Working dir: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3
+  Full command: ['C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\output\\20260611_110706\\iter_3\\loader_3.exe', 'C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\tests\\calc.bin']
+
+  Process started: PID=8224
+--- Check Detections ---
+Checking detections iteration 1/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-11T02:11:59.675277 to 2026-06-11T02:16:59.675277 (300s)
+  Process filter: loader_3.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 2/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-11T02:12:07.526912 to 2026-06-11T02:17:07.526912 (300s)
+  Process filter: loader_3.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 3/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-11T02:12:15.342130 to 2026-06-11T02:17:15.342130 (300s)
+  Process filter: loader_3.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 4/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-11T02:12:23.152533 to 2026-06-11T02:17:23.152533 (300s)
+  Process filter: loader_3.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 5/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-11T02:12:30.941818 to 2026-06-11T02:17:30.941818 (300s)
+  Process filter: loader_3.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+--- Analyze Results ---
+Solved Rules: ['Malicious Behavior Prevention Alert: Potential Process Creation via ShellCode']
+--- Record History ---
+
+--- Agent Loop Finished ---
+
+Final Status: clean
+Total Iterations: 4
+
+SUCCESS! EEDR Bypass Achieved.
+Loader Executable: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\iter_3\loader_3.exe
+Summary saved to C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260611_110706\final_summary.txt

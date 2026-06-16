@@ -1,0 +1,24 @@
+For Rule: Malicious Behavior Prevention Alert: Shellcode Execution via Python Script
+
+- **Detection_Logic**: The rule identifies malicious behavior by correlating several indicators originating from the Python interpreter (`python.exe`). The core detection pattern is the sequence of Windows API calls used for self-injection:
+    1.  **Process Context**: The activity originates from `python.exe`, a scripting engine not typically expected to perform low-level memory manipulation for code execution.
+    2.  **Memory Allocation API**: A call to `kernel32!VirtualAlloc` is made to create a new, private memory region (unbacked by a file on disk).
+    3.  **Memory Permissions Change**: A subsequent call to `kernel32!VirtualProtect` is made on this newly allocated region to change its permissions from `PAGE_READWRITE` to an executable state (`PAGE_EXECUTE_READ`).
+    4.  **Execution Transfer**: Control flow is transferred to this private, newly executable memory region.
+    The combination of these events, especially from a scripting interpreter, creates a high-confidence signature for shellcode execution.
+
+- **Known_Exclusions**: No specific exclusions are listed in the provided details. However, EDRs often have implicit exclusions or lower scoring for execution that occurs within memory regions backed by legitimate, signed modules on disk.
+
+- **Gap_Detail**: The rule's primary weakness is its reliance on detecting execution from **newly allocated, private (unbacked) memory**. The EDR telemetry likely flags the `VirtualAlloc` -> `Write` -> `VirtualProtect` -> `Execute` sequence on a memory region with no corresponding file on disk. If execution can be staged within a memory region that is already executable and is backed by a legitimate module, the rule may be bypassed.
+
+- **Bypass_Strategy**: **Module Stomping**. This technique avoids allocating new private memory altogether. Instead, it hijacks an executable section of an already loaded (or newly loaded) legitimate DLL.
+
+    **Proposed Modification Plan:**
+    1.  **Load a Legitimate Module**: Use `ctypes` to call `kernel32!LoadLibraryA` to load a non-essential but legitimate system DLL into the process space. A good candidate would be a DLL that is not critical to the Python process's stability (e.g., `amsi.dll`, `uxtheme.dll`).
+    2.  **Locate Executable Section**: Instead of parsing PE headers (which is complex in Python), a simpler approach is to get the module's base address from the `LoadLibraryA` handle and use that as the target. The start of a module is typically executable.
+    3.  **Make Section Writable**: Call `kernel32!VirtualProtect` on the module's base address to change its memory protection to `PAGE_EXECUTE_READWRITE`. This allows the shellcode to be written into it.
+    4.  **Copy Shellcode**: Use `ctypes.memmove` to copy the shellcode to the module's base address, overwriting the initial bytes of the legitimate DLL in memory.
+    5.  **Execute Shellcode**: Create a function pointer (`CFUNCTYPE`) to the module's base address and call it.
+    6.  **Cleanup**: The memory will be released when the process terminates. No `VirtualFree` is needed as we are not using `VirtualAlloc`.
+
+    This approach breaks the detection logic by eliminating the `VirtualAlloc` call for shellcode and ensuring that the memory being executed is backed by a legitimate file on disk, thus appearing far less suspicious to the EDR.

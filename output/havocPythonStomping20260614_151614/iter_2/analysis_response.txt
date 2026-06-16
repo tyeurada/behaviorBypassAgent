@@ -1,0 +1,26 @@
+For Rule: Malicious Behavior Prevention Alert: Shellcode Execution via Python Script
+
+- **Detection_Logic**: The rule most likely identifies this threat by observing a sequence of suspicious behaviors originating from the Python interpreter (`python.exe`). The core indicators are:
+    1.  **Process Context**: The parent process is `python.exe`, an interpreter not typically associated with low-level memory manipulation and direct code execution.
+    2.  **Memory Allocation**: A call to `kernel32!VirtualAlloc` requests memory with `PAGE_EXECUTE_READWRITE` (RWX) permissions. Allocating a memory region that is simultaneously writable and executable is a highly suspicious and classic indicator of shellcode injection.
+    3.  **Execution Origin**: A thread's execution starts from this newly allocated, unbacked (not associated with a file on disk) memory region.
+
+- **Known_Exclusions**: No specific exclusions are provided in the rule details. Standard exclusions often involve trusted signers or specific process paths, which are not applicable here per the constraints. The focus must be on behavioral gaps.
+
+- **Gap_Detail**: The primary gap in the EDR's logic is likely its reliance on the single, high-confidence indicator of a direct RWX memory allocation. Many rules are tuned to detect the `VirtualAlloc(..., PAGE_EXECUTE_READWRITE)` pattern specifically because it has a very low false-positive rate. The rule may not be sophisticated enough to correlate separate memory allocation and permission modification events on the same memory region over time.
+
+- **Bypass_Strategy**:
+    - **Priority 1 (Same Technique Modification)**: Modify the memory allocation and protection strategy to avoid the single suspicious RWX allocation. This is known as the **RW_to_RX** pattern.
+        1.  Call `VirtualAlloc` to allocate a memory region with non-executable permissions, specifically `PAGE_READWRITE`. This appears as a normal memory allocation.
+        2.  Use `ctypes.memmove` to copy the shellcode into this writable memory region.
+        3.  Call `VirtualProtect` on the memory region to change its permissions from `PAGE_READWRITE` to `PAGE_EXECUTE_READ`.
+        4.  Execute the shellcode from the now-executable memory.
+        This approach breaks the detection pattern by separating the "write" and "execute" stages, forcing the EDR to correlate two distinct API calls (`VirtualAlloc` and `VirtualProtect`) instead of detecting one highly suspicious call.
+
+    - **Priority 2 (Alternative Technique)**: If the RW_to_RX pattern is also detected, it implies the EDR is monitoring for `VirtualProtect` calls that add execute permissions to private memory. An effective alternative is **Module Stomping**.
+        1.  Load a legitimate, non-essential DLL from disk into the process memory using `LoadLibrary`.
+        2.  Identify the base address and size of an executable section (e.g., `.text`) within that loaded module.
+        3.  Use `VirtualProtect` to change the permissions of that section to `PAGE_EXECUTE_READWRITE`.
+        4.  Overwrite the legitimate code in that section with the shellcode.
+        5.  Call or create a thread pointing to the start of the shellcode within the stomped module section.
+        This bypasses the "unbacked memory execution" indicator, as the code execution now originates from a memory region that is backed by a legitimate file on disk.

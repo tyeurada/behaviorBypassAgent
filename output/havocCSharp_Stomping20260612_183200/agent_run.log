@@ -1,0 +1,160 @@
+Starting Evasive AI Agent...
+Shellcode: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\havoc.bin
+Max Iterations: 4
+Output Directory: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200
+
+--- Agent Loop Started ---
+
+--- Generate Code (Iteration 1) ---
+  [DEBUG] invoking LLM for code generation...
+  [DEBUG] LLM response received.
+  [DEBUG] Finish Reason: STOP
+  [DEBUG] Safety Ratings: [{'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: 'HARM_CATEGORY_SEXUALLY_EXPLICIT'>, 'overwritten_threshold': None, 'probability': <HarmProbability.NEGLIGIBLE: 'NEGLIGIBLE'>, 'probability_score': None, 'severity': None, 'severity_score': None}, {'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_HATE_SPEECH: 'HARM_CATEGORY_HATE_SPEECH'>, 'overwritten_threshold': None, 'probability': <HarmProbability.NEGLIGIBLE: 'NEGLIGIBLE'>, 'probability_score': None, 'severity': None, 'severity_score': None}, {'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_HARASSMENT: 'HARM_CATEGORY_HARASSMENT'>, 'overwritten_threshold': None, 'probability': <HarmProbability.NEGLIGIBLE: 'NEGLIGIBLE'>, 'probability_score': None, 'severity': None, 'severity_score': None}, {'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: 'HARM_CATEGORY_DANGEROUS_CONTENT'>, 'overwritten_threshold': None, 'probability': <HarmProbability.LOW: 'LOW'>, 'probability_score': None, 'severity': None, 'severity_score': None}]
+  [DEBUG] Raw Content Type: str
+  [DEBUG] Raw Content Length: 9925
+  [DEBUG] Normalized Content Length: 9925
+--- Compile Code ---
+--- Execute Code ---
+
+[EXECUTOR DEBUG]
+  Executable: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1\loader_1.exe
+  Shellcode:  C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\havoc.bin
+  Command:    C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1\loader_1.exe C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\havoc.bin
+  Working dir: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1
+  Full command: ['C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\output\\20260612_183200\\iter_1\\loader_1.exe', 'C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\tests\\havoc.bin']
+
+  Process started: PID=5676
+--- Check Detections ---
+Checking detections iteration 1/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:30:29.498413 to 2026-06-12T09:35:29.498413 (300s)
+  Process filter: loader_1.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1\loader_1.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 2/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:30:37.716487 to 2026-06-12T09:35:37.716487 (300s)
+  Process filter: loader_1.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1\loader_1.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 3/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:30:45.918306 to 2026-06-12T09:35:45.918306 (300s)
+  Process filter: loader_1.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1\loader_1.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 4/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:30:53.875113 to 2026-06-12T09:35:53.875113 (300s)
+  Process filter: loader_1.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1\loader_1.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 5/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:31:01.845715 to 2026-06-12T09:36:01.845715 (300s)
+  Process filter: loader_1.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_1\loader_1.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+--- Analyze Results ---
+--- Record History ---
+--- Generate Code (Iteration 2) ---
+  [DEBUG] invoking LLM for code generation...
+  [DEBUG] LLM response received.
+  [DEBUG] Finish Reason: STOP
+  [DEBUG] Safety Ratings: [{'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: 'HARM_CATEGORY_SEXUALLY_EXPLICIT'>, 'overwritten_threshold': None, 'probability': <HarmProbability.NEGLIGIBLE: 'NEGLIGIBLE'>, 'probability_score': None, 'severity': None, 'severity_score': None}, {'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_HATE_SPEECH: 'HARM_CATEGORY_HATE_SPEECH'>, 'overwritten_threshold': None, 'probability': <HarmProbability.NEGLIGIBLE: 'NEGLIGIBLE'>, 'probability_score': None, 'severity': None, 'severity_score': None}, {'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_HARASSMENT: 'HARM_CATEGORY_HARASSMENT'>, 'overwritten_threshold': None, 'probability': <HarmProbability.NEGLIGIBLE: 'NEGLIGIBLE'>, 'probability_score': None, 'severity': None, 'severity_score': None}, {'blocked': None, 'category': <HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: 'HARM_CATEGORY_DANGEROUS_CONTENT'>, 'overwritten_threshold': None, 'probability': <HarmProbability.NEGLIGIBLE: 'NEGLIGIBLE'>, 'probability_score': None, 'severity': None, 'severity_score': None}]
+  [DEBUG] Raw Content Type: str
+  [DEBUG] Raw Content Length: 10399
+  [DEBUG] Normalized Content Length: 10399
+--- Compile Code ---
+--- Execute Code ---
+
+[EXECUTOR DEBUG]
+  Executable: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe
+  Shellcode:  C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\havoc.bin
+  Command:    C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\havoc.bin
+  Working dir: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2
+  Full command: ['C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\output\\20260612_183200\\iter_2\\loader_2.exe', 'C:\\Users\\terada\\Documents\\GitHub\\evasiveAIAgent_LangGraph\\tests\\havoc.bin']
+
+  Process started: PID=7824
+--- Check Detections ---
+Checking detections iteration 1/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:35:08.687658 to 2026-06-12T09:40:08.687658 (300s)
+  Process filter: loader_2.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 2/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:35:16.736421 to 2026-06-12T09:40:16.736421 (300s)
+  Process filter: loader_2.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 3/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:35:24.674691 to 2026-06-12T09:40:24.674691 (300s)
+  Process filter: loader_2.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 4/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:35:32.651613 to 2026-06-12T09:40:32.651613 (300s)
+  Process filter: loader_2.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+Checking detections iteration 5/5...
+[Elastic] Connected successfully to serverless (version 9.5.0)
+[Elastic] Connected successfully to serverless (version 9.5.0)
+
+[ELASTIC DEBUG]
+  Time range: 2026-06-12T09:35:40.612403 to 2026-06-12T09:40:40.612403 (300s)
+  Process filter: loader_2.exe
+  File filter: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe
+  Smart filtering: True
+  Fallback: 0 total alert(s) in time window, filtering by process/file...
+--- Analyze Results ---
+--- Record History ---
+
+--- Agent Loop Finished ---
+
+Final Status: clean
+Total Iterations: 3
+
+SUCCESS! EEDR Bypass Achieved.
+Loader Executable: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\iter_2\loader_2.exe
+Summary saved to C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\output\20260612_183200\final_summary.txt

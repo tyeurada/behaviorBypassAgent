@@ -1,0 +1,24 @@
+For Rule: Malicious Behavior Prevention Alert: Potential Process Creation via ShellCode
+
+- **Detection_Logic**: Detects process creation originating from memory regions that are likely to contain shellcode. This often involves monitoring process creation events (e.g., `CreateProcess` or similar APIs) and tracing back the origin of the code being executed by the new process. The rule likely flags processes created directly or indirectly from memory pages with RWX permissions, especially when those pages are not backed by a legitimate module on disk.
+
+- **Known_Exclusions**: Likely includes exclusions based on trusted parent processes, signed binaries, or specific memory regions known to be used for legitimate purposes. Stack-based exclusions might exist, where process creation originating from a call stack containing trusted modules is allowed.
+
+- **Gap_Detail**: The current implementation uses `VirtualAlloc` with `PAGE_EXECUTE_READWRITE`, which is a strong indicator of potential shellcode. The absence of a backing module for the allocated memory makes it easily detectable.
+
+- **Bypass_Strategy**:
+    1.  **Module Stomping**: Instead of allocating RWX memory, load a legitimate DLL (e.g., using `LoadLibrary`). Find an executable section within the loaded DLL. Overwrite the contents of that executable section with the shellcode using `memcpy`. Then, execute the code at the entry point of the overwritten section. This makes the memory region appear to be backed by a legitimate module, potentially bypassing the "unbacked memory" check. This approach leverages an existing executable memory region.
+    2.  **RWX Allocation with API Proxying**: Keep the RWX allocation but proxy the call to `CreateProcess` through a legitimate, signed process. This could involve injecting code into a trusted process and having that process create the new process with the shellcode. This would shift the blame to the trusted process, potentially bypassing the rule's focus on the immediate parent process.
+    3.  **Indirect Syscall**: Instead of directly calling `CreateProcess`, use an indirect syscall method. This could potentially bypass user-mode hooks that the EDR relies on to detect process creation. However, this is less about bypassing the rule logic and more about evading detection mechanisms.
+
+For Rule: Malicious Behavior Prevention Alert: Process Creation from Unbacked Memory via Unsigned Parent
+
+- **Detection_Logic**: Detects process creation where the parent process is unsigned and the code being executed originates from memory that is not backed by a legitimate module on disk. This rule aims to catch scenarios where shellcode is injected into an unsigned process, which then creates a new process executing that shellcode.
+
+- **Known_Exclusions**: This rule likely has exclusions based on signed parent processes, trusted memory regions (e.g., those associated with known system DLLs), or specific API calls.
+
+- **Gap_Detail**: The parent process in the original test is likely the test executable itself, which is unsigned. Additionally, the memory region used to store the shellcode is allocated using `VirtualAlloc` without any backing module, making it a clear indicator of malicious activity.
+
+- **Bypass_Strategy**:
+    1.  **Signed Parent Process**: While we cannot directly sign the test executable, we can explore launching the shellcode execution from a signed process. This can be achieved by code injection into a signed process (e.g., `svchost.exe`) and then executing the shellcode from within that process. The injected code would need to perform the memory allocation and shellcode execution. This changes the parent process to a signed one, satisfying the rule's exclusion criteria. Note: this moves the detection point to the injection, not the process creation.
+    2.  **Module Stomping (Again)**: As mentioned previously, use module stomping. This addresses the "unbacked memory" condition by overwriting a legitimate module's executable section with shellcode. This makes the memory appear to be backed by a signed module, potentially bypassing the rule.

