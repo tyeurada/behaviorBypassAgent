@@ -1459,30 +1459,49 @@
                     `<option value="${m}" ${geminiModel === m ? 'selected' : ''}>${m}</option>`
                 ).join('\n                            ');
 
+                const activeProvider = ai.provider || 'gemini';
+                const providerModel = (ai[activeProvider] && ai[activeProvider].model) || '';
+                const providerBaseUrl = (ai[activeProvider] && ai[activeProvider].base_url) || '';
+                const providerApiKeyEnv = (ai[activeProvider] && ai[activeProvider].api_key_env) || 'OPENAI_COMPATIBLE_API_KEY';
                 const aiCard = document.createElement('div');
                 aiCard.className = 'config-card';
                 aiCard.innerHTML = `
                     <div class="config-card-title">AI Model & Provider</div>
                     <div class="config-group">
                         <label class="config-label">AI Provider</label>
-                        <select id="cfgAiProvider" class="config-input">
+                        <select id="cfgAiProvider" class="config-input" onchange="updateProviderFieldsVisibility()">
                             <option value="gemini" ${ai.provider === 'gemini' ? 'selected' : ''}>Google Gemini (Recommended)</option>
                             <option value="openai" ${ai.provider === 'openai' ? 'selected' : ''}>OpenAI GPT</option>
                             <option value="anthropic" ${ai.provider === 'anthropic' ? 'selected' : ''}>Anthropic Claude</option>
+                            <option value="deepseek" ${ai.provider === 'deepseek' ? 'selected' : ''}>DeepSeek</option>
+                            <option value="openai_compatible" ${ai.provider === 'openai_compatible' ? 'selected' : ''}>Custom Endpoint (OpenAI-compatible)</option>
                         </select>
                     </div>
-                    <div class="config-group">
+                    <div class="config-group" id="cfgGeminiModelGroup">
                         <label class="config-label">Gemini Model</label>
                         <select id="cfgGeminiModel" class="config-input">
                             ${modelOptionsHtml}
                         </select>
                     </div>
+                    <div class="config-group" id="cfgProviderModelGroup">
+                        <label class="config-label">Model</label>
+                        <input type="text" id="cfgProviderModel" class="config-input" value="${providerModel}" placeholder="e.g. gpt-4o, deepseek-chat, qwen3:14b">
+                    </div>
+                    <div class="config-group" id="cfgProviderBaseUrlGroup">
+                        <label class="config-label">Base URL</label>
+                        <input type="text" id="cfgProviderBaseUrl" class="config-input" value="${providerBaseUrl}" placeholder="http://localhost:11434/v1 (Ollama) or https://your-endpoint/v1">
+                    </div>
+                    <div class="config-group" id="cfgApiKeyEnvGroup">
+                        <label class="config-label">API Key Env Var Name</label>
+                        <input type="text" id="cfgApiKeyEnv" class="config-input" value="${providerApiKeyEnv}" placeholder="OPENAI_COMPATIBLE_API_KEY">
+                    </div>
                     <div class="config-group">
                         <label class="config-label">Temperature</label>
-                        <input type="number" step="0.1" min="0" max="2" id="cfgAiTemp" class="config-input" value="${gemini.temperature || 0.7}">
+                        <input type="number" step="0.1" min="0" max="2" id="cfgAiTemp" class="config-input" value="${(ai[activeProvider] && ai[activeProvider].temperature) || 0.7}">
                     </div>
                 `;
                 form.appendChild(aiCard);
+                updateProviderFieldsVisibility();
 
                 // 2. Compiler Settings
                 const compiler = config.compiler || {};
@@ -1603,6 +1622,18 @@
                 updateCompilerFieldsVisibility();
             }
 
+            function updateProviderFieldsVisibility() {
+                const provider = document.getElementById('cfgAiProvider').value;
+                const geminiGroup = document.getElementById('cfgGeminiModelGroup');
+                const providerGroup = document.getElementById('cfgProviderModelGroup');
+                const baseUrlGroup = document.getElementById('cfgProviderBaseUrlGroup');
+                const apiKeyEnvGroup = document.getElementById('cfgApiKeyEnvGroup');
+                if (geminiGroup) geminiGroup.style.display = (provider === 'gemini') ? 'block' : 'none';
+                if (providerGroup) providerGroup.style.display = (provider === 'gemini') ? 'none' : 'block';
+                if (baseUrlGroup) baseUrlGroup.style.display = (provider === 'openai_compatible' || provider === 'deepseek') ? 'block' : 'none';
+                if (apiKeyEnvGroup) apiKeyEnvGroup.style.display = (provider === 'openai_compatible') ? 'block' : 'none';
+            }
+
             function updateCompilerFieldsVisibility() {
                 const langEl = document.getElementById('cfgCompilerLang');
                 if (!langEl) return;
@@ -1637,9 +1668,24 @@
                 if (!activeConfig) return;
 
                 // Update activeConfig object from form inputs
-                activeConfig.ai.provider = document.getElementById('cfgAiProvider').value;
+                const selectedProvider = document.getElementById('cfgAiProvider').value;
+                activeConfig.ai.provider = selectedProvider;
                 activeConfig.ai.gemini.model = document.getElementById('cfgGeminiModel').value;
-                activeConfig.ai.gemini.temperature = parseFloat(document.getElementById('cfgAiTemp').value) || 0.7;
+                if (selectedProvider !== 'gemini') {
+                    activeConfig.ai[selectedProvider] = activeConfig.ai[selectedProvider] || {};
+                    const modelInput = document.getElementById('cfgProviderModel').value.trim();
+                    if (modelInput) activeConfig.ai[selectedProvider].model = modelInput;
+                    activeConfig.ai[selectedProvider].temperature = parseFloat(document.getElementById('cfgAiTemp').value) || 0.7;
+                    if (selectedProvider === 'openai_compatible' || selectedProvider === 'deepseek') {
+                        activeConfig.ai[selectedProvider].base_url = document.getElementById('cfgProviderBaseUrl').value.trim();
+                    }
+                    if (selectedProvider === 'openai_compatible') {
+                        const keyEnv = document.getElementById('cfgApiKeyEnv').value.trim();
+                        activeConfig.ai[selectedProvider].api_key_env = keyEnv || 'OPENAI_COMPATIBLE_API_KEY';
+                    }
+                } else {
+                    activeConfig.ai.gemini.temperature = parseFloat(document.getElementById('cfgAiTemp').value) || 0.7;
+                }
 
                 activeConfig.compiler.language = document.getElementById('cfgCompilerLang').value;
                 activeConfig.compiler.type = document.getElementById('cfgCompilerType').value;
