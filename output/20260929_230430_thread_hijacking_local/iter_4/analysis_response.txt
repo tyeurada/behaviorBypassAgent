@@ -1,0 +1,92 @@
+# Rule Gap Analysis — Iteration 3
+
+## Executive Summary
+
+Iteration 3 attempted to escape the `Suspicious System Module Image Hollowing` rule by moving the donor DLL out of `C:\Windows\System32`/`SysWOW64` (the regex `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`). The runtime donor selection picked `msado15.dll` under `C:\Program Files\Common Files\System\ado\`. **This should have matched the `not process.thread.Ext.call_stack_final_user_module.path like ("c:\\program files\\*")` exclusion** — yet the rule still fired. That tells us the exclusion didn't apply, and the reason is almost certainly that `process.thread.Ext.call_stack_final_user_module` is **not** the donor DLL — it's a *different* module that the final user frame resolves to (most likely our own loader's image, or a kernelbase/ntdll frame that survived the call-stack walk). The exclusion is keyed on the *final user module of the call stack*, not on `target_address_path`. So swapping the donor directory was necessary but not sufficient.
+
+Below is the per-rule gap analysis for the single persistent rule. (The three Iter-1 rules are marked "Solved" and were not re-triggered; I include a short note on each at the end for completeness.)
+
+---
+
+## Rule: Suspicious System Module Image Hollowing
+
+- **Detection_Logic**:
+  Fires on a single `VirtualProtect` event where **all** of the following are true:
+  1. `process.Ext.api.name == "VirtualProtect"` and `process.Ext.api.behaviors == "hollow_image"` (i.e. the target page is *image-backed* — the loader stomped an existing mapped `.text`, not private memory).
+  2. `process.Ext.api.parameters.size >= 10000` (large protection change).
+  3. `process.Ext.api.metadata.target_address_path` matches `c:\windows\(system32|syswow64)\[a-z]+.dll` — **the stomped donor lives in System32/SysWOW64 and its name is all-lowercase letters followed by `.dll`**.
+  4. `process.thread.Ext.call_stack_final_user_module` is a *known* module (name not `Undetermined`/`Unknown`/`Kernel`, summary not `*Unknown*`, `protection_provenance` not `Undetermined`/`Unbacked`/`Kernel*`).
+  5. That final user module has **no trusted code signature** (`_arraysearch(... trusted == false or exists == false)` AND `not _arraysearch(... trusted == true)`).
+  6. The call stack does **not** contain a LoadLibrary/GetProcAddress/LdrLoadDll/ExitProcess frame.
+  7. The final user module's path is **not** in the allowlist: `nativeimages_*.dll`, `c:\program files\*`, `c:\program files (x86)\*`, `twain_32\*.dll`, `umppc*.dll`, `spool\drivers\*`.
+  8. The final user module has a non-null SHA256 and is not in the known-good hash blocklist.
+
+  The rule is a **conjunction of 8 conditions**. It only needs one to be false to stop firing.
+
+- **Known_Exclusions** (from the rule text):
+  - Path allowlist: `c:\windows\assembly\nativeimages_*.dll`, `c:\program files\*`, `c:\program files (x86)\*`, `c:\windows\twain_32\*.dll`, `c:\windows\system32\umppc*.dll`, `c:\windows\system32\spool\drivers\*`.
+  - Name exclusion: `ntdll.dll*`, `kernel32.dll*`, `kernelbase.dll*` (covered by other rules).
+  - Call-stack symbol exclusion: `kernelbase.dll!LoadLibrary*`, `kernel32.dll!ExitProcess*`, `kernelbase.dll!GetProcAddressForCaller*`, `ntdll.dll!LdrLoadDll*`.
+  - Signature exclusion: any frame where `code_signature.trusted == true`.
+  - Provenance exclusion: `Undetermined`, `Unbacked`, `Kernel*`.
+  - Hash blocklist (known-good).
+
+- **Gap_Detail**:
+  Iter 3 correctly moved the donor out of System32, but the rule *still* fired. Two possibilities, and both are exploitable:
+
+  1. **The exclusion at condition 7 is keyed on `call_stack_final_user_module.path`, not on `target_address_path`.** Iter 3 changed the *donor* path (which feeds `target_address_path`), but the rule's `C:\Program Files\*` exclusion checks the *final user module of the call stack* — a completely different field. Since the loader performs `VirtualProtect` from its own image (or from a frame that resolves to a module whose path is **not** under `Program Files`), the exclusion never matched. **The donor directory is irrelevant to the exclusion; only the call-stack's terminal module matters.**
+
+  2. **Condition 3's regex is narrower than it looks**: `c:\windows\(system32|syswow64)\[a-z]+.dll` requires the filename to be **only lowercase ASCII letters** before `.dll`. A donor named e.g. `MSADO15.DLL` (uppercase), `msado15_2.dll` (digit/underscore), or a DLL in a *subdirectory* like `c:\windows\system32\spool\drivers\x64\...` would fail the regex. Note the allowlist itself already exploits this: `umppc*.dll` and `spool\drivers\*` are excluded because they'd otherwise match. **This means condition 3 is the *cheapest* condition to falsify — no need to touch the call stack at all.**
+
+  There is also a third, structural gap: **condition 6 only excludes four specific symbol strings.** Any other legitimate frame (e.g. `kernelbase.dll!VirtualProtect`, `ntdll.dll!NtProtectVirtualMemory`, or a `LoadLibraryExW` variant) leaves the rule armed.
+
+- **Bypass_Strategy** (same technique, minimal change — pick the lowest-cost falsification):
+
+  **Option A — falsify condition 3 (target path regex).** Keep the current module-stomping + thread-hijack mechanics, but select the donor so that `target_address_path` **does not match** `c:\windows\(system32|syswow64)\[a-z]+.dll`. Concretely:
+  - Prefer a donor whose filename contains a **digit, underscore, or uppercase letter** (e.g. `msado15.dll` already has digits — verify the actual path recorded by the sensor; if the sensor lowercases, instead pick a donor in a **subdirectory** such as `C:\Windows\System32\spool\drivers\x64\...` or `C:\Windows\System32\DriverStore\...`).
+  - Or use a donor already covered by the allowlist's *spirit*: `C:\Windows\System32\umppc*.dll` or `C:\Windows\System32\spool\drivers\*` are explicitly excluded — but note these still match condition 3, they're excluded by condition 7. **The cleanest falsification is a donor whose recorded path simply fails the `[a-z]+\.dll` regex** (subdirectory, or non-alpha characters in the basename).
+  - Iter 3's `C:\Program Files\...` donor was the right instinct but the wrong field. Re-target the *donor path* to a path that breaks the regex, not the allowlist.
+
+  **Option B — falsify condition 7 via the call stack (the "real" gap).** Make `process.thread.Ext.call_stack_final_user_module.path` resolve to a `C:\Program Files\*` path. This requires the *terminal* frame of the call stack to be a module loaded from `Program Files`. Achievable by:
+  - Performing the `VirtualProtect` call **from inside a function exported by a Program Files-resident signed DLL** (i.e. call through a pointer obtained via `GetProcAddress` from a DLL in `C:\Program Files\...`), so the top user frame is that DLL.
+  - Or **proxy the `VirtualProtect` call through a gadget in such a DLL** (proxy_function_calls pattern), so the return address / caller frame resolves to the Program Files module.
+  - This also satisfies condition 5's `trusted == true` exclusion if the Program Files DLL is signed — but note the rule's condition 5 is an AND of "no trusted sig" and "not any trusted sig", so a single trusted frame anywhere in `code_signature` array kills it. **This is the strongest gap: a signed call-stack frame alone neutralizes the rule.**
+
+  **Option C — falsify condition 5 via signature presence.** If the final user module can be made to be a *signed* module (even a benign one, e.g. by routing the call through a signed DLL's exported function), `not _arraysearch(... trusted == true)` becomes false and the rule drops. This is the same mechanism as Option B but stated as the signature check.
+
+  **Recommended next iteration:** combine **Option A (donor path that breaks the `[a-z]+\.dll` regex — e.g. a donor in `System32\spool\drivers\x64\` or a basename with digits/underscores)** with **Option B (route the `VirtualProtect` call through an exported function of a signed DLL under `C:\Program Files\*`)**. Either alone should falsify the conjunction; together they're belt-and-suspenders. Keep the existing thread-hijack execution path unchanged — the rule is about the *stomping* event, not the execution trigger.
+
+  **Do not** attempt to satisfy the exclusion by changing `process.executable` (loader path) — that's out of scope per constraints.
+
+---
+
+## Rule: Elastic FileScore / Malicious File alert (Solved, Iter 1)
+
+- **Detection_Logic**: File reputation / hash scoring on the dropped loader binary; fires on static or first-seen indicators, not on runtime behavior.
+- **Known_Exclusions**: Known-good hash blocklist; signed binaries; files with established reputation.
+- **Gap_Detail**: Already solved in Iter 1 — likely by avoiding the static signature that scored the file. No runtime gap to exploit further.
+- **Bypass_Strategy**: No action needed; do not regress. If it re-fires, it indicates the payload bytes (not the loader) are being scored — would require payload-level obfuscation, out of scope for this rule family.
+
+## Rule: Process Creation from Unbacked Memory via Unsigned Parent (Solved, Iter 1)
+
+- **Detection_Logic**: Watches `CreateProcess`/process-creation where the *parent* image is unsigned and the child is created from memory that isn't backed by an image (i.e. the loader's own image is unsigned and it spawns the target).
+- **Known_Exclusions**: Signed parents; parents whose image is backed by a file on disk.
+- **Gap_Detail**: Solved in Iter 1 — likely by ensuring the spawning frame is module-backed (decoy stub in our `.text`) or by not spawning the observable target directly from the loader.
+- **Bypass_Strategy**: Preserve the Iter-1 fix. If it re-fires, route process creation through a signed host (`rundll32_hosting`) so the parent is signed.
+
+## Rule: Potential Process Creation via ShellCode (Solved, Iter 1)
+
+- **Detection_Logic**: Call-stack / memory-provenance heuristic tying process creation to a thread whose start address or return path points into unbacked (private, non-image) memory.
+- **Known_Exclusions**: Module-backed start addresses; trusted call-stack frames.
+- **Gap_Detail**: Solved in Iter 1 — the decoy stub + thread-hijack design keeps the thread start address module-backed.
+- **Bypass_Strategy**: Preserve the decoy-stub pattern; ensure the hijacked thread's original start address remains inside our image's `.text`.
+
+---
+
+## Concrete Next-Iteration Plan
+
+1. **Keep** `thread_hijacking_local` + `module_stomping` mechanics (they're working; the execution trigger is not the problem).
+2. **Change the donor selection** so `target_address_path` fails the regex `c:\windows\(system32|syswow64)\[a-z]+.dll` — pick a donor under a `System32` **subdirectory** (e.g. `spool\drivers\x64\...`) or with a basename containing digits/underscores/uppercase. This is the single cheapest falsification of condition 3.
+3. **Additionally**, route the `VirtualProtect` call through an exported function of a **signed DLL under `C:\Program Files\*`** (proxy_function_calls pattern), so `call_stack_final_user_module.path` lands in the allowlist *and* `code_signature.trusted == true` — falsifying conditions 5 and 7 simultaneously.
+4. **Do not** touch `process.executable` or attempt signing — out of scope.
+5. Re-run and observe which condition the sensor records; if the rule still fires, the sensor is likely normalizing `target_address_path` (lowercasing + stripping subdirs), in which case pivot fully to Option B (call-stack proxying through a Program Files signed DLL).

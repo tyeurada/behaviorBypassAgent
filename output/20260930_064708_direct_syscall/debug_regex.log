@@ -1,0 +1,34 @@
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 1 ---
+  [DEBUG] content length: 14287
+  [DEBUG] content start: '### EXPLANATION\n\n1. **Baseline analysis**: This is'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 11628
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 2 ---
+  [DEBUG] content length: 19695
+  [DEBUG] content start: '# Theoretical Analysis\n\n## Why Iteration 1 crashed'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] C source validation issues: ['undocumented NT API usage without declarations (ACCESS_MASK, NtClose, NtCreateSection, PHANDLE) — either include <winternl.h> or fully typedef every type/prototype (Nt*/Zw* types are NOT provided by <windows.h>)']
+  [DEBUG] Validation retry improved issues (1 -> 0)
+  [DEBUG] Final code length: 17491
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 2 ---
+  [DEBUG] content length: 21864
+  [DEBUG] content start: '### THEORETICAL_ANALYSIS\n\n**Root cause of Iteratio'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 18855
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 3 ---
+  [DEBUG] content length: 27824
+  [DEBUG] content start: '### THEORETICAL_ANALYSIS\n\n**Root cause of Iteratio'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 23036

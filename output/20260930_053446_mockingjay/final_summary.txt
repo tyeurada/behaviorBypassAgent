@@ -1,0 +1,5 @@
+Final Status: clean
+Total Iterations: 3
+
+SUCCESS! EEDR Bypass Achieved.
+Loader Executable: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260930_053446_mockingjay\iter_2\loader_mockingjay_2.exe

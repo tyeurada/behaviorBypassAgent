@@ -1,0 +1,108 @@
+# EDR Rule Gap Analysis — Module Stomping + Fiber (Iter 3)
+
+## Execution Failure Context
+
+Iter 3 hit the target: the loader **compiled, linked, and executed** — and was detected by **all four rules**. This is a *successful detection*, not a crash. The task is now to find the logical gaps in each rule and modify the *same* technique (module stomping + fiber) to slip through.
+
+The key realization: all four rules share the same **core detection primitive** — `process.Ext.api.behaviors == "hollow_image"` combined with call-stack module resolution (`process.thread.Ext.call_stack_final_user_module`). Our current implementation triggers this because we map a **system DLL from `c:\windows\system32\`** as an image section and then `VirtualProtect` a **≥10000-byte region** inside it to RW→RX.
+
+---
+
+## For Rule: Suspicious System Module Image Hollowing (542a6a6c)
+
+- **Detection_Logic**: Fires on `VirtualProtect` with behavior `hollow_image` where (a) `size >= 10000`, (b) target address path matches `c:\windows\(system32|syswow64)\[a-z]+.dll`, (c) the final call-stack module is *not* trusted-signed, and (d) the final module is not ntdll/kernel32/kernelbase. It is fundamentally a **"big RW→RX flip inside a system DLL that isn't normally patched"** detector.
+
+- **Known_Exclusions** (from Active Rules Details):
+  - `process.Ext.api.metadata.target_address_name` in `ntdll.dll*`, `kernel32.dll*`, `kernelbase.dll*`
+  - `size < 10000` (implicit — the rule requires `>= 10000`)
+  - Call stack contains `kernelbase.dll!LoadLibrary*`, `kernel32.dll!ExitProcess*`, `kernelbase.dll!GetProcAddressForCaller*`, `ntdll.dll!LdrLoadDll*`
+  - Final module path under: `c:\windows\assembly\nativeimages_*.dll`, `c:\program files\*`, `c:\program files (x86)\*`, `c:\windows\twain_32\*.dll`, `c:\windows\system32\umppc*.dll`, `c:\windows\system32\spool\drivers\*`
+  - Final module hash in the sanitized hash allowlist
+
+- **Gap_Detail**: Two exploitable gaps in the *current* implementation:
+  1. **Size threshold**: We currently flip the entire `.text` region in one `VirtualProtect` call. If the shellcode is small, we can split the RW→RX flip into **multiple `VirtualProtect` calls each `< 10000` bytes** — the rule's `size >= 10000` predicate never matches.
+  2. **Path regex**: The regex `c:\windows\(system32|syswow64)\[a-z]+.dll` only matches **lowercase-only** filenames with no digits/underscores. Our sacrificial DLL is a system32 DLL — moving it to an **allowlisted path** (`c:\program files\*` or `c:\program files (x86)\*`) immediately satisfies the `not ... path like` exclusion.
+
+- **Bypass_Strategy** (same technique, modified):
+  - **Sacrificial DLL relocation**: Copy a legitimate signed DLL (e.g. `C:\Program Files\Windows Media Player\wmp.dll` or any DLL under `C:\Program Files\`) to a staging location under `C:\Program Files\` and map *that* as the image section. The final call-stack module path then matches the `c:\program files\*` exclusion.
+  - **Chunked protection flip**: Split the RW→RX transition into N calls of `< 10000` bytes each (e.g. 8192-byte chunks). Payload size must be < 10000 per chunk; if larger, use multiple chunks. This defeats the `size >= 10000` conjunct without changing the technique.
+  - **Stack provenance**: Because we map an image section (not `LoadLibrary`), the final module resolves to our chosen DLL path — which now sits in the allowlisted `Program Files` tree.
+
+---
+
+## For Rule: Hollow Image Behavior via Native API (c6231a7f)
+
+- **Detection_Logic**: Requires the **same** `VirtualProtect` + `hollow_image` behavior, **plus** `behaviors == "native_api"` (i.e. the call went through an Nt*/Zw* primitive rather than a Win32 wrapper), a non-null final-module SHA256, an untrusted final module, and a target module that is not ntdll/kernel32/Unknown.
+
+- **Known_Exclusions**:
+  - Final module path: `?:\\windows\\assembly\\nativeimages_*`, `?:\\windows\\installer\\*.tmp`, `c:\windows\system32\dk?win64.dll`, `ntdll.dll`, `lsasrv.dll`, `cpsrt.dll`, `c:\program files\*`, `c:\program files (x86)\*`
+  - `target_address_name == "clr.dll" && size == 428`
+  - Call stack contains `ntdll.dll!LdrResolveDelayLoadsFromDll*`
+  - `spool\drivers\x64\3\*.dll` with `size <= 4096`
+  - Hash in sanitized allowlist
+
+- **Gap_Detail**: This rule only fires when the protection change is performed via a **native API** (`NtProtectVirtualMemory`). Our current loader uses `VirtualProtect` (Win32) — but the `native_api` behavior flag is being set anyway (likely because the underlying Nt call is captured). The **most robust gap** is the **path allowlist**: `c:\program files\*` and `c:\program files (x86)\*` are excluded. Additionally, the `spool\drivers\x64\3\*.dll` + `size <= 4096` exclusion is a **size-gated path bypass** — a spooler DLL with a small flip is explicitly whitelisted.
+
+- **Bypass_Strategy** (same technique, modified):
+  - **Use a Program Files DLL** as the sacrificial image (same relocation as above). This satisfies the `not ... path :` exclusion for *both* hollowing rules simultaneously.
+  - **Alternative — spooler path**: Map a DLL from `c:\windows\system32\spool\drivers\x64\3\` and keep each `VirtualProtect` chunk `<= 4096` bytes. This hits the explicit size-gated exclusion.
+  - **Avoid `native_api` flag**: If the harness emits `native_api` because we call `NtProtectVirtualMemory` directly, switch the flip back to the Win32 `VirtualProtect` wrapper — the Win32 path does not set the `native_api` behavior, and `hollow_image` alone is insufficient for this rule (it requires both). This is the cleanest single-line change.
+
+---
+
+## For Rule: AMSI Bypass from Suspicious Module (64043824)
+
+- **Detection_Logic**: Fires when `target_address_name like "amsi.dll*"` AND (`VirtualProtect`/`VirtualProtectEx` with `protection like "?W*"` OR `WriteProcessMemory`), with an untrusted or Microsoft-signed final module, minus a large allowlist.
+
+- **Known_Exclusions**:
+  - Final module provenance `Kernel*`, name in `Kernel`/`Unknown`/`Undetermined`
+  - Hash in large sanitized allowlist
+  - Final module path: `apphelp.dll`, `lsasrv.dll`, `combase.dll`, `ieadvpack.dll`, `syswow64\*.dll`, `microsoft.net\framework*.dll`, `assembly\nativeimages_*.ni.dll`, `winsxs\temp\pendingdeletes\$$deleteme*`, `mrt\*\mpengine.dll`, `wbem\fastprox.dll`, `winsxs\*.dll`, `c:\program files (x86)\*`, `c:\program files\*`, `syswow64\werfault.exe`
+  - Provenance path: `microsoft.net\framework*\clr.dll`, `syswow64\combase.dll`, `system32\combase.dll`
+  - `ccmsetup.exe` parent chain
+  - Call stack contains `ntdll.dll!LdrLoadDll*` or `kernelbase.dll!LoadLibrary*`
+
+- **Gap_Detail**: **This rule did NOT need to fire for our technique at all.** It only triggers because the *payload* (or the stomped module's import resolution) touched `amsi.dll`. Our loader itself never targets AMSI. The detection is almost certainly an artifact of the **stomped DLL's import table** resolving `amsi.dll` at load time, or the shellcode being an AMSI-bypass payload. The gap: **the rule keys on `target_address_name like "amsi.dll*"`** — if the stomped module does not import or touch AMSI, the rule cannot fire.
+
+- **Bypass_Strategy** (same technique, modified):
+  - **Choose a sacrificial DLL that does not import `amsi.dll`** (e.g. a media/graphics DLL under Program Files). This removes the `target_address_name like "amsi.dll*"` precondition entirely.
+  - If the payload itself is the AMSI-bypass, note that the rule still requires a `VirtualProtect`/`WriteProcessMemory` against `amsi.dll` **from the loader's call stack**. Executing the AMSI patch *inside the payload* (after fiber transfer) rather than from the loader's own code path means the call stack's final module is the **stomped Program Files DLL** — which matches the `c:\program files\*` exclusion.
+  - **Do not call `VirtualProtect` on amsi.dll from the loader.** Defer any AMSI-related memory ops to the payload stage, and ensure the payload's own module provenance resolves to the allowlisted stomped DLL.
+
+---
+
+## For Rule: Suspicious Access to LSA Secrets Registry (c5ee8453)
+
+- **Detection_Logic**: Registry access (non-modification) to `HKLM\SECURITY\Policy\Secrets\*` or `HKLM\SECURITY\CACHE*` by SYSTEM (`S-1-5-18`), excluding a large allowlist of legitimate security-tool executables.
+
+- **Known_Exclusions**: Long `process.executable` allowlist (lsass, third-party agents, regedit, etc.), plus specific `dsregcmd`/`LTSVC`/`$MACHINE.ACC\CupdTime` path pairs, plus trusted-signer exclusions, plus `event.outcome == "failure"` (failed attempts are ignored).
+
+- **Gap_Detail**: **This rule is unrelated to our loader.** Our loader does not touch LSA secrets. The alert is almost certainly a **false positive from background SYSTEM activity** during the test window (e.g. an Elastic agent, a Windows service, or the harness's own registry polling). It is not a detection of our technique.
+
+- **Bypass_Strategy**:
+  - **No action required on the loader.** This rule is out of scope for module stomping + fiber.
+  - If the harness attributes it to our process, verify the `process.executable` field — our loader runs as the interactive user, not SYSTEM, so `user.id == "S-1-5-18"` should not match. If it does match, the telemetry is misattributed and the rule is not a real detection surface for us.
+  - **Do not attempt to evade this rule** — doing so would require touching LSA secrets, which is a *different* technique entirely and would only increase detection surface.
+
+---
+
+## Consolidated Next-Iteration Strategy
+
+The single highest-leverage change is **sacrificial DLL relocation** — it simultaneously defeats the path-allowlist gaps in *both* hollowing rules and the AMSI rule:
+
+| Change | Rule Defeated | Mechanism |
+|---|---|---|
+| Map a DLL from `C:\Program Files\` (or `C:\Program Files (x86)\`) instead of `system32` | 542a6a6c, c6231a7f, 64043824 | Matches `not ... path : ("c:\\program files\\*")` exclusion |
+| Split RW→RX flip into chunks `< 10000` bytes (and `<= 4096` if using spooler path) | 542a6a6c, c6231a7f | Defeats `size >= 10000` conjunct and hits `size <= 4096` exclusion |
+| Use Win32 `VirtualProtect` (not `NtProtectVirtualMemory`) for the flip | c6231a7f | Removes `native_api` behavior flag |
+| Pick a sacrificial DLL with no `amsi.dll` import | 64043824 | Removes `target_address_name like "amsi.dll*"` precondition |
+| Keep fiber execution via `ConvertThreadToFiber`/`CreateFiber`/`SwitchToFiber` | all | No thread-start telemetry; start address resolves to allowlisted Program Files DLL |
+| Leave LSA secrets untouched | c5ee8453 | Out of scope; likely background FP |
+
+**Concrete implementation delta** (no new technique — same `module_stomping_fiber`):
+1. Change the `NtOpenFile` target path from a `system32` DLL to a signed DLL under `C:\Program Files\` (e.g. `C:\Program Files\Windows Media Player\wmp.dll` — verify it exists on the test host; fall back to any signed DLL under `Program Files`).
+2. Replace the single `VirtualProtect(execAddr, totalSize, PAGE_EXECUTE_READ, ...)` with a loop of `VirtualProtect(chunk, 8192, PAGE_EXECUTE_READ, ...)` calls.
+3. Ensure the protection flip uses the Win32 `VirtualProtect` wrapper, not the direct Nt call, so `native_api` is not set.
+4. Keep the fiber launch unchanged.
+
+This is a **pure parameter/selection change** to the existing technique — no new APIs, no new behavioral footprint — and it directly targets the exclusion clauses that the rule authors already provided.

