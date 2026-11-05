@@ -1,0 +1,26 @@
+# Code Correction Task (Compilation Failure)
+
+## Available Evasion Techniques (Reference)
+You may switch to a different technique if the current one is fundamentally broken.
+{{ standard_techniques_block }}
+
+## Context
+The previous {{ lang_name }} code failed to compile or syntax check. We need to fix the errors.
+
+## Previous Code ({{ lang_name }} that failed)
+```{{ code_block_tag }}
+{{ code_that_failed }}
+```
+
+## Compilation Output
+{{ detection_info }}
+
+## Task
+1. Analyze the error message to identify the syntax or linker issue.
+2. Provide a strategy to fix the code so it compiles with MSVC (cl.exe).
+
+## Output Format
+**Analysis**: [Explain the error clearly]
+**Rule_Analysis**: N/A (Compilation Error)
+**Technique**: BugFix
+**Methodology**: [Specific fix, e.g. "Add missing header <winternl.h>"]
