@@ -1,0 +1,89 @@
+# EDR Rule Gap Analysis
+
+## Context
+We are analyzing EDR detection rules to identify logical gaps and design improvements.
+A test executable triggered alerts or failed validation. We need to understand each rule's logic, identify exceptions/exclusions, and propose precision improvements.
+
+## Memory & History
+### Iteration History
+{{ history_block }}
+
+### Rule Analysis
+{{ rule_analysis_block }}
+
+### Active Approach Status
+{{ status_block }}
+
+### Banned Approaches (Do NOT attempt these)
+{{ banned_block }}
+{% if generic_malware_alert %}
+## SPECIAL INSTRUCTION: GENERIC MALWARE ALERT DETECTED
+The EDR flagged the artifact with "Malware Detection Alert" (Rule ID: 9a1a2dae-0b5f-4c3d-8305-a268d404c306).
+This is likely a STATIC ANALYSIS or ML SCORE detection, not a specific behavior rule.
+
+**REQUIRED STRATEGY**:
+You MUST lower the entropy and make the binary look like legitimate software.
+1. **Add Dummy Functions**: specific benign calculations or string operations.
+2. **String Stacking**: Declare unused benign strings (e.g., error messages, UI text).
+3. Rename suspicious variable names and strings (e.g., `shellcode` → `buffer`, `payload` → `data`, `inject` → `process`).
+
+{% endif %}
+{{ context }}
+
+## Detection Details
+{{ detection_info }}
+
+## Task
+1. **Analyze** the execution failure or detection alert using the provided telemetry
+2. **Per-Rule Analysis**: For EACH triggered detection rule (or previously triggered rule), perform individual gap analysis:
+- Identify the rule's detection logic and scope
+- **Priority 1**: Examine the rule's exclusion/exception conditions (check "Active Rules Details" if available)
+- **Priority 2**: Find gaps in the current technique's implementation that could bypass this specific rule
+- **Priority 3**: If no gap exists within the current technique, propose alternative approaches
+3. **Design** next validation strategy focusing on rule gaps, NOT just evasion
+
+## Exclusion Strategy Constraints
+When analyzing Known_Exclusions, adhere to these rules:
+- **Ignore `process.executable`**: The loader's filename and filepath cannot be modified, so do not propose exclusions based on them.
+- **Ignore `code_signature`**: Signatures cannot be applied, so do not propose exclusions based on trusted signers.
+- **Notable Exclusions**: **Stack-based** (e.g., call stack modules) and **API-based** exclusions.
+
+## Example of Analysis Logic
+When analyzing a detection rule, identify conditions that can be neutralized by altering specific parameters. For instance:
+
+- **Regex Constraints**: If a rule filters `process.Ext.api.metadata.target_address_path` with a regex like `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`, using a DLL from a different directory (e.g., `C:\\Program Files\\...`) would serve as a bypass technique.
+
+- **Allowlists**: If there is an exclusion list (`NOT LIKE`) for specific paths such as:
+  - `c:\\windows\\assembly\\nativeimages_*.dll`
+  - `c:\\program files\\*`
+  The detection can be evaded by ensuring the `call_stack` (e.g., via call stack spoofing or API proxying) or module path (e.g., Module Stomping a DLL loaded from that allowed path) aligns with these allowed paths.
+
+**Requirements for Prompt Construction:**
+Generalization: Do not fixate only on the examples provided above. The model should flexibly identify "Allowlists" or "Excluded Conditions" within any given rule and prioritize satisfying those exclusions.
+
+## Standard Testing Methodologies
+{{ standard_techniques_block }}
+{% if techniques_kb_block %}
+
+## Techniques Knowledge Base
+Curated implementation notes for the enabled/preferred techniques. Prefer these concrete patterns over generic code.
+{{ techniques_kb_block }}
+{% endif %}
+{{ lang_specific_rules_block }}
+
+## Output Format
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+[Repeat for each triggered rule]
