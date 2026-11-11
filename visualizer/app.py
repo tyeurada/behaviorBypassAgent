@@ -12,10 +12,19 @@ app = Flask(__name__)
 # Base directory for outputs (relative to this file)
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / 'output'
+FRONTEND_DIST = Path(__file__).resolve().parent / 'frontend' / 'dist'
 
 @app.route('/')
 def index():
+    """Serve the built Vite frontend, falling back to the legacy template."""
+    dist_index = FRONTEND_DIST / 'index.html'
+    if dist_index.exists():
+        return send_from_directory(FRONTEND_DIST, 'index.html')
     return render_template('index.html')
+
+@app.route('/assets/<path:filename>')
+def frontend_assets(filename):
+    return send_from_directory(FRONTEND_DIST / 'assets', filename)
 
 @app.route('/api/sessions')
 def get_sessions():

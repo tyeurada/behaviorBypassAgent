@@ -1,0 +1,27 @@
+# Code Correction Task (Execution Failure)
+
+## Available Evasion Techniques (Reference)
+You may switch to a different technique if the current one is fundamentally broken.
+{{ standard_techniques_block }}
+
+## Context
+The code compiled but failed during execution (crash, early exit, or shellcode loading failure).
+
+## Previous Code ({{ lang_name }} that failed at runtime)
+```{{ code_block_tag }}
+{{ code_that_failed }}
+```
+
+## Execution Output
+{{ detection_info }}
+
+## Task
+1. Analyze the runtime behavior.
+2. Identify the logical flaw or crash reason.
+3. Propose a fix to ensure successful execution (shellcode injection and thread start).
+
+## Output Format
+**Analysis**: [Explain the runtime failure]
+**Rule_Analysis**: N/A (Execution Error)
+**Technique**: BugFix
+**Methodology**: [Specific fix, e.g. "Fix memory alignment in VirtualAlloc"]
