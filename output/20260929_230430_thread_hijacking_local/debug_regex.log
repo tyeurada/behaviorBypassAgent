@@ -1,0 +1,32 @@
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 1 ---
+  [DEBUG] content length: 6731
+  [DEBUG] content start: '### EXPLANATION\n\n1. **Baseline analysis**: This is'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 4775
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 2 ---
+  [DEBUG] content length: 13131
+  [DEBUG] content start: '### THEORETICAL_ANALYSIS\n\nThe iteration‑1 alerts a'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 9632
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 3 ---
+  [DEBUG] content length: 19335
+  [DEBUG] content start: '### THEORETICAL_ANALYSIS\n\nThe Iter-2 detection cam'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 16562
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 4 ---
+  [DEBUG] content length: 27031
+  [DEBUG] content start: '### THEORETICAL_ANALYSIS\n\n**Why Iter 3 was detecte'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 23481

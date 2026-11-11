@@ -1,0 +1,15 @@
+SUCCESS: True
+OUTPUT: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_204435_module_stomping_fiber\iter_3\loader_module_stomping_fiber_3.exe
+
+--- STDOUT ---
+Initializing Visual Studio environment...
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.10.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Compiling...
+loader_module_stomping_fiber_3.c
+Compilation successful!
+
+--- STDERR ---

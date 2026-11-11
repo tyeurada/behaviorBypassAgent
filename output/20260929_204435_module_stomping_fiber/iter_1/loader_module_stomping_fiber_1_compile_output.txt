@@ -1,0 +1,19 @@
+SUCCESS: True
+OUTPUT: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_204435_module_stomping_fiber\iter_1\loader_module_stomping_fiber_1.exe
+
+--- STDOUT ---
+Initializing Visual Studio environment...
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.10.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Compiling...
+loader_module_stomping_fiber_1.c
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_204435_module_stomping_fiber\iter_1\loader_module_stomping_fiber_1.c(165): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_204435_module_stomping_fiber\iter_1\loader_module_stomping_fiber_1.c(220): error C2065: 'OBJ_CASE_INSENSITIVE': 定義されていない識別子です。
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_204435_module_stomping_fiber\iter_1\loader_module_stomping_fiber_1.c(228): error C2065: 'FILE_SYNCHRONOUS_IO_NONALERT': 定義されていない識別子です。
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_204435_module_stomping_fiber\iter_1\loader_module_stomping_fiber_1.c(228): error C2065: 'FILE_NON_DIRECTORY_FILE': 定義されていない識別子です。
+ERROR: Compilation failed
+
+--- STDERR ---
