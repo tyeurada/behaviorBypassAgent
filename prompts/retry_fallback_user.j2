@@ -1,0 +1,7 @@
+{%- if is_python -%}
+Return a minimal, safe diagnostics script in Python for Windows. It must import os and sys, print process id and input path if provided. Use a ```python markdown block only.
+{%- elif is_csharp -%}
+Return a minimal, safe diagnostics program in C# for Windows. It must include using System, int Main(string[] args), print process id and input path if provided, and return. Use a ```csharp markdown block only.
+{%- else -%}
+Return a minimal, safe diagnostics program in C for Windows. It must include #include lines, int main(int argc, char* argv[]), print process id and input path if provided, and return 0. Use a ```c markdown block only.
+{%- endif %}
