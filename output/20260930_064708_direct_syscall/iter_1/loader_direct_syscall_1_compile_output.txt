@@ -1,0 +1,16 @@
+SUCCESS: True
+OUTPUT: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260930_064708_direct_syscall\iter_1\loader_direct_syscall_1.exe
+
+--- STDOUT ---
+Initializing Visual Studio environment...
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.10.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Compiling...
+loader_direct_syscall_1.c
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260930_064708_direct_syscall\iter_1\loader_direct_syscall_1.c(1): warning C4819: ファイルは、現在のコード ページ (932) で表示できない文字を含んでいます。データの損失を防ぐために、ファイルを Unicode 形式で保存してください。
+Compilation successful!
+
+--- STDERR ---

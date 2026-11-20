@@ -1,0 +1,24 @@
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 1 ---
+  [DEBUG] content length: 11166
+  [DEBUG] content start: '### EXPLANATION\n\n**1. Analysis of the baseline det'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 8308
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 1 ---
+  [DEBUG] content length: 10230
+  [DEBUG] content start: '### EXPLANATION\n\n1. **Analysis (first iteration)**'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 8075
+--- LLM Metadata ---
+Finish Reason: stop
+Safety Ratings: None
+--- Iteration 2 ---
+  [DEBUG] content length: 15833
+  [DEBUG] content start: '### THEORETICAL_ANALYSIS\n\n**Root cause of Iteratio'
+  [DEBUG] Code validation passed (#include and main found)
+  [DEBUG] Final code length: 13170

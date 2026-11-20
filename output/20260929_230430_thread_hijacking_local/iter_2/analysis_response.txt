@@ -1,0 +1,82 @@
+# EDR Rule Gap Analysis — Iteration 1
+
+## Executive Summary
+
+Iteration 1 used `thread_hijacking_local` with a **plain `VirtualAlloc(RW) → VirtualProtect(RX)`** staging buffer. That is the root cause of all three alerts. The thread-hijacking portion itself worked (the thread's recorded StartAddress was the module-backed `DecoyStub`), but the **payload address lives in a private, unbacked, freshly-allocated region** with no module backing. Every rule below keys on exactly that fact.
+
+The critical insight: **all three alerts share a single common predicate** — `process.parent.thread.Ext.call_stack_contains_unbacked == true` (or the equivalent "unbacked memory" file-score signal). Fix the *memory provenance*, not the thread mechanics, and all three rules collapse simultaneously.
+
+---
+
+## For Rule: Elastic FileScore / Malicious File alert
+
+- **Detection_Logic**: A static/pre-execution file reputation layer. It scores the on-disk PE (`loader_thread_hijacking_local_1.exe`) using file metadata (size, entropy, section characteristics, import table, strings, imphash, compile timestamp) and/or Elastic's global malware corpus. It is **not** a behavioral rule — it fires before the process even runs. The "matched local rule" shown (LSA Secrets) is a mis-attribution in the telemetry; the actual trigger is the file-score engine on the dropped binary.
+- **Known_Exclusions**: None controllable in-code. The rule's exclusion set is server-side (reputation hash allowlist). We cannot sign the file (`code_signature` constraint) and cannot rename it (`process.executable` constraint).
+- **Gap_Detail**: The rule evaluates the **loader binary itself**, not the payload. The current loader is a small, freshly-compiled, unsigned PE with a tiny import table (`VirtualAlloc`, `CreateThread`, `SetThreadContext`, `ResumeThread`) — a textbook "shellcode loader" import fingerprint. It also has no version resource, no manifest, and a high-entropy payload path string. This is purely a **static artifact problem** and is orthogonal to runtime technique.
+- **Bypass_Strategy** (do not modify loader identity — instead reduce static signal):
+  1. **Import-table normalization**: replace direct imports of `VirtualAlloc`/`VirtualProtect`/`SetThreadContext` with runtime resolution (`GetProcAddress` on `kernel32`/`ntdll` handles obtained via `GetModuleHandleA`). This removes the "loader import fingerprint" that file-score models weight heavily.
+  2. **Section/entropy shaping**: keep the binary small and low-entropy; avoid embedding the payload path literal in a way that produces high-entropy strings (the current `argv[1]` handling is already good — keep it).
+  3. **Note**: this rule is the hardest to defeat without signing. Treat it as a *persistent* rule and focus iterations on the two behavioral rules, which are directly addressable by memory-provenance changes.
+
+---
+
+## For Rule: Process Creation from Unbacked Memory via Unsigned Parent
+
+- **Detection_Logic**: A two-stage sequence (`maxspan=3m`) correlated by `user.id` then `process.parent.entity_id`:
+  - **Stage 0 (event0)**: a process start where the *child* has `relative_file_creation_time <= 500` **or** `relative_file_name_modify_time <= 500` (i.e. freshly-dropped binary), is unsigned/untrusted, and is not in a small allowlist.
+  - **Stage 1**: a subsequent process start whose **parent thread** has `call_stack_contains_unbacked == true` **and** whose `call_stack_summary` matches a hardcoded list of module-chain patterns ending in `Unbacked` (e.g. `ntdll.dll|kernelbase.dll|kernel32.dll|Unbacked`), **and** the new process is either a .NET host, a bare `system32\*.exe` with `args_count <= 1`, or has the **same SHA256 as event0**.
+- **Known_Exclusions**:
+  - Parent not `devenv.exe` (VS).
+  - Child not in `{Cognex…, PWPatientXpress.exe, JobEngineService.exe}`.
+  - `process.pe.imphash != f34d5f2d4577ed6d9ceec516c1f5a744` (a known .NET stub hash).
+  - **Stack-based exclusion is the exploitable surface**: the `call_stack_summary` match requires the *exact* module sequence ending in `Unbacked`. If the call stack terminates in a **module-backed** frame (no `Unbacked` sentinel), the rule's Stage 1 predicate is false.
+- **Gap_Detail**: The current loader allocates the payload in a **private `VirtualAlloc` region**. When the shellcode (running on the hijacked thread) calls `CreateProcess`, the parent thread's call stack walks: `kernel32!CreateProcessW → … → kernelbase → ntdll → [Unbacked region]`. That `Unbacked` frame is exactly what Stage 1 matches. **The gap is that the rule only detects unbacked *code* on the parent thread's stack — if the executing code lives in a module-backed RX region, the stack walk resolves to a legitimate DLL and `call_stack_contains_unbacked` becomes false.**
+- **Bypass_Strategy** (same technique — `thread_hijacking_local` — modified staging):
+  1. **Module stomping as the staging primitive**: instead of `VirtualAlloc(RW)+VirtualProtect(RX)`, map a legitimate signed DLL (e.g. `mshtml.dll`, `edgehtml.dll`, `winhttp.dll` — NOT `kernel32.dll`) as a `SEC_IMAGE` section, then overwrite its `.text` with the payload. The payload now executes from **image-backed executable memory** whose module path resolves to a signed Microsoft DLL.
+  2. **Keep the thread-hijack mechanics identical**: `CreateThread(CREATE_SUSPENDED, DecoyStub)` → `GetThreadContext` → `ctx.Rip = stomped_module_entry` → `SetThreadContext` → `ResumeThread`. The thread start address is still module-backed, and now the *execution* address is also module-backed.
+  3. **Result**: when the payload's `CreateProcess` runs, the stack walk shows `…|mshtml.dll|Unbacked`? No — it shows the stomped module frame, so `call_stack_summary` no longer ends in `Unbacked` and `call_stack_contains_unbacked` is false. Stage 1 never fires.
+  4. **Secondary hardening**: also break Stage 0 by ensuring the *child* process is not freshly-dropped (spawn a pre-existing signed binary like `notepad.exe` — the payload already does this) and its SHA256 differs from event0's.
+
+---
+
+## For Rule: Potential Process Creation via ShellCode
+
+- **Detection_Logic**: Single-event rule on process start. Requires **all** of:
+  - `process.parent.thread.Ext.call_stack_contains_unbacked == true`, **AND**
+  - `process.parent.thread.Ext.call_stack_summary : "*kernel32.dll|Unbacked*"` (wildcard match — the summary must contain `kernel32.dll` immediately followed by `Unbacked`), **AND**
+  - an array search over `call_stack` for a frame whose `symbol_info` matches `*kernel32.dll!WinExec*`.
+- **Known_Exclusions**:
+  - `not (code_signature.trusted == true AND subject_name in {GIGA-BYTE, Intuit, Ramsauer, Aptean, MICRO-STAR})` — signing is out of scope per constraints.
+  - `sc.exe` spawned by `svchost.exe` with `command_line == "sc start LenovoPcManagerService"`.
+  - Child not in `{Ponds33\Refined Method\Main.exe, Ponds33\Underdrain\UDMain.exe, Ponds33\NPCalc\NPCalcMain.exe}`.
+- **Gap_Detail**: This rule is **triple-AND** on the parent thread's stack. It requires *simultaneously*: (a) an unbacked frame present, (b) that unbacked frame be directly preceded by `kernel32.dll`, and (c) a `WinExec` symbol in the stack. The current loader fails all three because the payload executes from a private `VirtualAlloc` region and the shellcode's process-spawn path (`CreateProcess`/`WinExec`) pushes an unbacked frame. **Every one of these predicates is a call-stack property of the executing region — none of them can be true if the payload executes from module-backed memory.**
+- **Bypass_Strategy** (same `thread_hijacking_local` technique, module-backed staging):
+  1. **Same fix as Rule 2**: stage the payload inside a stomped signed DLL's `.text`. The parent thread's stack walk then shows `…|mshtml.dll|<module frames>` and never produces the `kernel32.dll|Unbacked` adjacency.
+  2. **`WinExec` symbol suppression**: even if a `WinExec` call occurs, its frame will be attributed to the stomped module's symbol table (or unresolved-but-module-backed), not to an `Unbacked` region. The `_arraysearch` for `*kernel32.dll!WinExec*` combined with `*kernel32.dll|Unbacked*` cannot both match when the executing region is module-backed.
+  3. **Optional additional layer**: if the payload's spawn path uses `CreateProcessW` rather than `WinExec`, the `WinExec` symbol search fails outright — but do not rely on this alone since it's payload-dependent. The module-backing fix is the robust one.
+  4. **Do NOT** attempt to satisfy the allowlisted child paths (`Ponds33\*`) — those are `process.executable`-based and out of scope per constraints.
+
+---
+
+## Cross-Rule Synthesis: The Single Fix
+
+All three alerts are downstream of **one design choice**: `VirtualAlloc(RW) → VirtualProtect(RX)` produces a **private, unbacked, executable region**. The rules are stack-provenance detectors. The correct next iteration is:
+
+**`thread_hijacking_local` + `module_stomping` (image-section staging)**
+
+Concretely:
+1. `LoadLibraryA("mshtml.dll")` (or `edgehtml.dll` / `winhttp.dll`) — a signed Microsoft DLL with a large `.text` section, and crucially **not** in any rule's exclusion list as a *parent executable* (we are not changing `process.executable` of the loader; we are using the DLL only as a memory donor).
+2. Parse the PE headers of the loaded image, locate the `.text` section (characteristics `IMAGE_SCN_MEM_EXECUTE`), `VirtualProtect` it to `PAGE_READWRITE`, `memcpy` the payload over the section start, restore to `PAGE_EXECUTE_READ`.
+3. `CreateThread(CREATE_SUSPENDED, DecoyStub)` → `GetThreadContext` → `ctx.Rip = (DWORD64)stomped_section_base` → `SetThreadContext` → `ResumeThread`.
+4. The payload's `CreateProcess`/`WinExec` now originates from **image-backed RX memory** whose module resolution is a signed Microsoft DLL.
+
+**Predicted effect per rule:**
+| Rule | Predicate defeated | Mechanism |
+|---|---|---|
+| FileScore | (static, orthogonal) | Runtime `GetProcAddress` import resolution reduces static fingerprint; may or may not clear |
+| Unbacked Parent | `call_stack_contains_unbacked == true` | Stack walk resolves to stomped module, no `Unbacked` sentinel |
+| ShellCode WinExec | `*kernel32.dll|Unbacked*` + `WinExec` search | Same — module-backed frames replace unbacked frames |
+
+**Why not a new technique?** The user-preferred `thread_hijacking_local` is retained. Only the *memory staging primitive* changes (private RW→RX → image-backed stomped section). This is a minimal, surgical modification that directly targets the shared predicate, which is the correct methodology: **neutralize the rule's trigger condition, not the detection rule itself.**
+
+**Residual risk**: The FileScore rule is static and may persist regardless of runtime changes. If it re-fires next iteration, the follow-up should focus on import-table obfuscation and binary shaping, treating FileScore as a persistent rule to be documented rather than defeated.

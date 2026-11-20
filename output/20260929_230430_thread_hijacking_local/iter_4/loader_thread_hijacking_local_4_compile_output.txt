@@ -1,0 +1,17 @@
+SUCCESS: True
+OUTPUT: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_230430_thread_hijacking_local\iter_4\loader_thread_hijacking_local_4.exe
+
+--- STDOUT ---
+Initializing Visual Studio environment...
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.10.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Compiling...
+loader_thread_hijacking_local_4.c
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_230430_thread_hijacking_local\iter_4\loader_thread_hijacking_local_4.c(1): warning C4819: ファイルは、現在のコード ページ (932) で表示できない文字を含んでいます。データの損失を防ぐために、ファイルを Unicode 形式で保存してください。
+C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_230430_thread_hijacking_local\iter_4\loader_thread_hijacking_local_4.c(534): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+Compilation successful!
+
+--- STDERR ---

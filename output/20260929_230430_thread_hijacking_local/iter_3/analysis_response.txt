@@ -1,0 +1,91 @@
+# EDR Rule Gap Analysis — Iteration 2
+
+## Executive Summary
+
+Iteration 2 combined `thread_hijacking_local` with **module_stomping into `mshtml.dll`**. The stomping mechanics were correct (the payload landed in an image-backed executable section), but the technique **collided with a different rule family** than Iter 1. The `Suspicious System Module Image Hollowing` rule is *specifically designed* to catch writes into `c:\windows\system32\*.dll` image sections — which is exactly what stomping `mshtml.dll` does. The rule's own comment ("ntdll, kernelbase and kernel32 are covered by other rules") tells us the author deliberately widened the target set to *every* System32/SysWOW64 DLL except those three.
+
+The fix is **not** to abandon module stomping — it is to pick a donor DLL that lands **outside** the `c:\windows\system32\[a-z]+.dll` regex while still being image-backed and executable.
+
+---
+
+## For Rule: Suspicious System Module Image Hollowing
+
+- **Detection_Logic**:
+  Fires on a `VirtualProtect` call where **all** of the following hold simultaneously:
+  1. `process.Ext.api.behaviors == "hollow_image"` — the API call flipped an *image-backed* page's protection (not a private/heap page). This is the core behavioral signal.
+  2. `process.Ext.api.parameters.size >= 10000` — a non-trivial region was re-protected (rules out tiny stubs).
+  3. `process.Ext.api.metadata.target_address_path` matches `c:\windows\(system32|syswow64)\[a-z]+.dll` — **the target module lives in System32 or SysWOW64**.
+  4. The final user module on the call stack is *not* `Undetermined/Unknown/Kernel`, and its `protection_provenance` is not `Undetermined/Unbacked/Kernel*`.
+  5. The target module name is not `ntdll.dll`, `kernel32.dll`, or `kernelbase.dll`.
+  6. The final user module's `code_signature` array contains at least one entry with `trusted == false` **or** `exists == false`, **AND** contains no entry with `trusted == true`.
+  7. No stack frame matches `kernelbase.dll!LoadLibrary*`, `kernel32.dll!ExitProcess*`, `kernelbase.dll!GetProcAddressForCaller*`, or `ntdll.dll!LdrLoadDll*`.
+  8. The final module's path is not under `c:\windows\assembly\nativeimages_*.dll`, `c:\program files\*`, `c:\program files (x86)\*`, `c:\windows\twain_32\*.dll`, `c:\windows\system32\umppc*.dll`, or `c:\windows\system32\spool\drivers\*`.
+  9. The final module has a non-null SHA-256 that is not in the sanitized hash blocklist.
+
+- **Known_Exclusions** (in priority order for exploitation):
+  - **Path allowlist (condition 8)** — the cleanest gap. Anything under `c:\program files\*` or `c:\program files (x86)\*` is explicitly whitelisted. Stomping a signed DLL that lives in `Program Files` satisfies the exclusion.
+  - **Module-name exclusion (condition 5)** — `ntdll/kernel32/kernelbase` are out of scope (covered by other rules, but those rules aren't firing here).
+  - **Call-stack symbol exclusion (condition 7)** — if the *final user module* on the stack is one of the listed loader functions, the alert is suppressed. This is a stack-hygiene lever.
+  - **Signature exclusion (condition 6)** — requires the final module to be *unsigned or untrusted*. A trusted-signature module would satisfy the `not _arraysearch(... trusted == true)` clause and suppress the rule. (Per constraints, we do not exploit signature acquisition, but we note the logic.)
+  - **`protection_provenance` exclusion (condition 4)** — a module whose provenance resolves to a legitimately loaded image (not `Unbacked`) is fine; this is what stomping already gives us.
+
+- **Gap_Detail**:
+  The rule keys on **the directory of the target module** via `target_address_path regex "c:\windows\(system32|syswow64)\[a-z]+.dll"`. It is a *path-prefix* rule, not a *behavior* rule. The `hollow_image` behavior alone is not sufficient — the module must also live under `System32`/`SysWOW64` for the rule to fire.
+
+  Iter 2 stomped `mshtml.dll`, which — on this host — resolved to `C:\Windows\System32\mshtml.dll`, perfectly matching the regex. That is the *only* reason the rule fired. The behavioral indicators (`hollow_image`, `size >= 10000`, untrusted final module) would also be produced by stomping *any* other DLL — but the path clause filters those out.
+
+  Additionally, the rule's **exclusion list itself contains the bypass**: `c:\program files\*` and `c:\program files (x86)\*` are explicitly excluded. Any signed, image-backed DLL that lives under Program Files is a legal stomping target that never matches the path regex.
+
+- **Bypass_Strategy** (same technique, different donor):
+  Keep `thread_hijacking_local + module_stomping` **exactly as-is**, but change the donor DLL from `mshtml.dll` (System32) to a signed DLL whose on-disk path is under **`C:\Program Files\...`** or **`C:\Program Files (x86)\...`**. Concretely:
+
+  1. **Donor selection at runtime** — enumerate loaded modules, or probe a small ordered list of candidates, and pick the first one whose `GetModuleFileNameA` path starts with `C:\Program Files` or `C:\Program Files (x86)` and whose PE has a sizeable `.text` section. Good candidates that ship on most Windows images and are loaded from Program Files:
+     - `C:\Program Files\Windows Media Player\wmp.dll` (or `wmpnetwork.dll`)
+     - `C:\Program Files (x86)\Microsoft\Edge\Application\<ver>\...` (Edge binaries; note these can be versioned paths)
+     - Any DLL under `C:\Program Files\Common Files\...`
+     If none are loaded, `LoadLibraryA` the candidate by its full Program Files path first (loading a signed DLL from Program Files is normal behavior), then stomp its `.text`.
+
+  2. **Verify the exclusion before stomping** — after resolving the donor path, assert `path` does **not** start with `C:\Windows\System32` or `C:\Windows\SysWOW64`, and *does* start with `C:\Program Files`. This guarantees condition 3 (the path regex) fails to match, so the entire rule short-circuits regardless of the `hollow_image` behavior.
+
+  3. **Keep the rest of the Iter-2 loader unchanged** — the `DecoyStub` thread-start trick, the runtime API resolution, the `RW → RX`-style protection flip inside the donor's `.text`, and the `SetThreadContext` RIP redirect all stay identical. Only the donor path changes.
+
+  4. **Optional stack-hygiene bonus** — if the path pivot alone is not enough (e.g. a sibling rule fires), route the `VirtualProtect` call through a frame whose `symbol_info` matches one of the condition-7 exclusions (`kernelbase.dll!LoadLibrary*` etc.) by calling `LoadLibraryA` on the donor immediately before the protection flip, so a loader frame is on the stack when `VirtualProtect` executes.
+
+  **Why this works**: the rule is a conjunction (`AND`). Breaking *any single* conjunct disables it. Condition 3 (`target_address_path regex c:\windows\(system32|syswow64)\...`) is the easiest conjunct to break, and the rule's own exclusion list (condition 8) tells us the author already considers `c:\program files\*` safe. Stomping a Program Files DLL is functionally identical to stomping `mshtml.dll` — same `hollow_image` behavior, same execution primitive — but the path clause no longer matches.
+
+---
+
+## For Rule: Elastic FileScore / Malicious File alert *(solved in Iter 1, re-verify)*
+
+- **Detection_Logic**: Static/reputation scoring on the dropped loader binary itself (file hash / entropy / import table / strings). Fires on the *file on disk*, not on runtime behavior.
+- **Known_Exclusions**: None applicable — this is a file-reputation rule; the loader's filename/path cannot be changed per constraints.
+- **Gap_Detail**: Solved in Iter 1 (outcome for this rule not listed as persistent). No action needed unless it re-fires.
+- **Bypass_Strategy**: No change. Do not regress the Iter-1 fix.
+
+## For Rule: Process Creation from Unbacked Memory via Unsigned Parent *(solved in Iter 1)*
+
+- **Detection_Logic**: A child process is created whose parent's thread start address / call stack resolves to unbacked (private, non-image) memory and the parent image is unsigned.
+- **Known_Exclusions**: Module-backed start addresses; signed parents (not exploitable per constraints).
+- **Gap_Detail**: Solved in Iter 1 by ensuring the thread start address is module-backed (`DecoyStub` in our `.text`). Iter 2 preserves this.
+- **Bypass_Strategy**: No change — keep the `DecoyStub` pattern; the donor-module pivot in the main rule does not affect this one.
+
+## For Rule: Potential Process Creation via ShellCode *(solved in Iter 1)*
+
+- **Detection_Logic**: Heuristic on thread creation where the start routine or first frames point at non-image memory, or shellcode-like byte patterns in executable regions.
+- **Known_Exclusions**: Image-backed executable regions.
+- **Gap_Detail**: Solved in Iter 1 via module-backed start address; Iter 2's donor-module stomping further reinforces this (payload lives in an image section).
+- **Bypass_Strategy**: No change.
+
+---
+
+## Recommended Next Iteration
+
+**Technique**: `thread_hijacking_local` + `module_stomping` (unchanged mechanics) with a **Program Files donor DLL** instead of `mshtml.dll`.
+
+**Single change from Iter 2**: replace the hardcoded `mshtml.dll` donor with a runtime donor-selection routine that:
+1. Probes a candidate list of signed DLLs known to live under `C:\Program Files\*` / `C:\Program Files (x86)\*`.
+2. `LoadLibraryA`s the first candidate whose full path starts with `C:\Program Files` (case-insensitive) and whose PE has a `.text` section `>= 10000` bytes.
+3. Explicitly rejects any candidate whose path starts with `C:\Windows\System32` or `C:\Windows\SysWOW64` (defensive — this is the exact condition-3 trigger).
+4. Stomps that donor's `.text` and proceeds with the existing thread-hijack flow.
+
+**Predicted outcome**: The `hollow_image` behavior still occurs (telemetry preserved), the payload still executes, but `process.Ext.api.metadata.target_address_path` no longer matches `c:\windows\(system32|syswow64)\[a-z]+.dll`, so the `Suspicious System Module Image Hollowing` rule's conjunct fails and the alert is suppressed.

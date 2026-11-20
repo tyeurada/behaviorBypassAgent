@@ -1,0 +1,137 @@
+# EDR Rule Gap Analysis — Iteration 3
+
+## Executive Summary of Iteration 2 Failure
+
+Iteration 2 failed **before** the detection logic even mattered:
+
+```
+[-] NtCreateSection(SEC_IMAGE) failed: 0xC0000022
+```
+
+`STATUS_ACCESS_DENIED` on `NtCreateSection` with `SEC_IMAGE`. This is a **build/technique bug, not a detection**, but it directly explains why both rules still fired: the section mapping never succeeded, so the code fell back to (or remained on) an unbacked RW→RX path, and `call_stack_contains_unbacked == true` was preserved throughout.
+
+Two structural problems in Iter 2 that must be fixed regardless of rule logic:
+
+1. **`SEC_IMAGE` requires `FileHandle` opened with `GENERIC_READ`|`GENERIC_EXECUTE` and `FILE_SHARE_READ`, plus `DesiredAccess` including `SECTION_MAP_EXECUTE`.** Passing `NULL` FileHandle with `SEC_IMAGE` is invalid → `0xC0000022`.
+2. Even if the mapping succeeded, **`EnumSystemLocalesEx` with a callback pointer into a *mapped image section* still produces an unbacked frame at the moment the callback returns into the payload** — the callback is invoked from `kernel32!EnumSystemLocalesEx`, and the return path shows the payload address, which the kernel attributes as unbacked because the mapped view is not in the loader's module list. **Module stomping does not fix the call-stack flag**; it fixes only the *executable region* heuristic. The Elastic rules key on `call_stack_contains_unbacked`, which is a **frame-origin** attribute, not a region attribute.
+
+This is the critical insight for Iter 3.
+
+---
+
+## Rule 1: Process Creation from Unbacked Memory via Unsigned Parent
+
+- **Detection_Logic**:
+  A two-stage sequence (`maxspan=3m`, correlated by `user.id`). Stage 1 (`event0`) flags a process whose **on-disk artifacts are fresh** (`relative_file_creation_time <= 500` or `relative_file_name_modify_time <= 500` seconds — i.e. just-dropped binary) and **unsigned**. Stage 2 matches a *child* process whose **parent thread call stack contains an unbacked frame** (`process.parent.thread.Ext.call_stack_contains_unbacked == true`) **and** whose `call_stack_summary` matches one of six literal module-chain templates, **and** the child is either a .NET host, a System32/SysWOW64 single-arg binary, or the *same hash* as `event0` (self-spawned child).
+  The "unbacked" flag is set by the Elastic kernel driver when a frame's return address does not resolve to any loaded module's `.text` range.
+
+- **Known_Exclusions**:
+  - `user.id : "S-1-5-18"` (SYSTEM) — not applicable, our loader runs as user.
+  - `code_signature.status : ("trusted", "errorExpired", "errorCode_endpoint*")` — **cannot be used** (no signing).
+  - Three hardcoded executable paths (Cognex, PatientWorks, WebEnrollment) — not applicable.
+  - `pe.imphash == "f34d5f2d4577ed6d9ceec516c1f5a744"` — a known-good import hash; not applicable.
+  - `parent.executable : "...devenv.exe"` — not applicable.
+
+- **Gap_Detail**:
+  The rule has **three AND-ed sub-conditions in stage 2** that must ALL hold:
+  1. `call_stack_contains_unbacked == true`
+  2. `call_stack_summary` matches a **literal pipe-delimited template**
+  3. child executable is .NET / System32-single-arg / same-hash-as-parent
+
+  The **weakest link is (2)**: the templates are *exact* module-chain strings like `"ntdll.dll|kernelbase.dll|kernel32.dll|Unbacked"`. Any chain that resolves differently — e.g. an extra intermediate module, a different DLL (win32u.dll, combase.dll, user32.dll), or a frame that resolves to a *loaded image* instead of `Unbacked` — **breaks the literal match** while `call_stack_contains_unbacked` may still be true. The rule author clearly expects the *specific* WinExec/Enum callback chains.
+
+  The second weakness is (1) itself: `call_stack_contains_unbacked` is only true **at the moment of the process-creation call**. If the actual `CreateProcess`/`WinExec` call is made from a **module-backed frame** (i.e. the call site lives inside a legitimately-loaded image's `.text`, not a private page), the flag is false and the entire stage-2 predicate collapses.
+
+  **Iter 2 failed to achieve either** because it executed from a private RW→RX page (flag = true) and never established a module-backed call site.
+
+- **Bypass_Strategy** (same technique, corrected):
+  Two coordinated changes:
+
+  1. **Fix the section mapping** so the payload executes from a **file-backed image view**, not a private page. This alone does not clear `call_stack_contains_unbacked` (the *return address* is still the private trampoline), so:
+
+  2. **Route the process-creation call through a module-backed frame.** Concretely: after stomping the sacrificial DLL's `.text`, do **not** call `WinExec`/`CreateProcess` from the payload directly. Instead:
+     - Overwrite a **single function prologue** inside the mapped image (e.g. a rarely-used export of the sacrificial DLL that is *not* in the call_stack_summary templates — `win32u.dll`, `combase.dll`, `bcrypt.dll` exports are good candidates) with a `jmp` to the payload.
+     - Then invoke that export **normally** from the loader's main thread. The call stack at the moment of `CreateProcess` will be `ntdll → kernelbase → kernel32 → kernel32!CreateProcessW → <sacrificial.dll!export>` — **no `Unbacked` frame**, because the trampoline lives inside a mapped, module-listed image.
+     - The `call_stack_summary` will then contain `sacrificial.dll` (e.g. `bcrypt.dll`), which is **not in the six literal templates** → stage 2 fails on condition (2) *and* (1).
+
+  This is the cleanest gap: **the rule's templates are an allowlist of *known-bad* chains, not a blocklist of *known-good* ones.** Any chain that includes an extra module name outside the templates escapes.
+
+  **Do NOT** use `EnumSystemLocalesEx` as the trigger for Iter 3 — it produces exactly the `kernel32.dll|Unbacked` chain the rule is hunting.
+
+---
+
+## Rule 2: Potential Process Creation via ShellCode
+
+- **Detection_Logic**:
+  Single-event rule. Fires when a child process is created AND:
+  1. `parent.thread.Ext.call_stack_contains_unbacked == true`, AND
+  2. `call_stack_summary` contains the substring `"*kernel32.dll|Unbacked*"` (i.e. `kernel32.dll` immediately followed by `Unbacked`), AND
+  3. `_arraysearch(call_stack, ..., symbol_info : "*kernel32.dll!WinExec*")` — a frame whose symbol resolves to **`kernel32.dll!WinExec`** specifically.
+
+  Exclusions: signed by five specific vendors (GIGA-BYTE, Intuit, Ramsauer, Aptean, MSI), a specific `sc.exe`+`svchost.exe`+`sc start LenovoPcManagerService` combo, and three Ponds33 paths.
+
+- **Known_Exclusions**:
+  - `code_signature.trusted == true` AND `subject_name` in a 5-vendor allowlist — **cannot use** (no signing).
+  - `sc.exe`/`svchost.exe`/`sc start LenovoPcManagerService` — not applicable.
+  - Three Ponds33 executable paths — not applicable.
+
+- **Gap_Detail**:
+  This rule is **narrower and easier to break** than Rule 1. It requires **`kernel32.dll!WinExec`** to appear as a resolved symbol in the *parent* call stack. That is a very specific indicator: it fires when shellcode calls `WinExec` directly.
+
+  **Gaps:**
+  1. **Do not call `WinExec`.** Use `CreateProcessW`, `CreateProcessAsUserW`, `NtCreateUserProcess`, `ShellExecuteExW`, or `RtlCreateUserProcess`. Any of these replaces the `kernel32.dll!WinExec` symbol with `kernel32.dll!CreateProcessW` (or `ntdll.dll!NtCreateUserProcess`) — condition (3) fails immediately.
+  2. **Even if you must use WinExec**, the substring `"*kernel32.dll|Unbacked*"` requires `Unbacked` to appear **immediately after** `kernel32.dll` in the summary. If the call stack shows `kernel32.dll|kernelbase.dll|Unbacked` (extra frame between), the wildcard does not match — condition (2) fails.
+  3. The `_arraysearch` is over `call_stack` (the full frame array), not `call_stack_summary`. If the `WinExec` frame is present but the *summary* string doesn't contain the exact adjacent pattern, the rule still fails — the two conditions are **AND**-ed and independently brittle.
+
+- **Bypass_Strategy** (same technique, corrected):
+  - **Replace `WinExec` with `CreateProcessW`** in the payload. This is the single most direct gap: condition (3) is a symbol-name match, and it is trivially defeated by using any other process-creation API.
+  - **Combine with Rule 1's fix**: trigger the process-creation call from a module-backed trampoline inside the stomped image. Then `call_stack_contains_unbacked` is false → condition (1) fails too. **Both rules are defeated by the same single change.**
+  - If the payload must remain `WinExec`-based (it is `calc.bin`, so we control it — use `CreateProcessW`), ensure the *trampoline* is the caller, not the private page.
+
+---
+
+## Cross-Rule Synthesis: The Single Root Cause
+
+Both rules share **one** load-bearing predicate:
+
+```
+process.parent.thread.Ext.call_stack_contains_unbacked == true
+```
+
+Everything else (summary templates, `WinExec` symbol, .NET host, same-hash child) is a **filter on top of that flag**. Iter 1 and Iter 2 both failed because they executed from a **private, non-module-backed region**, which is precisely what sets the flag.
+
+**Module stomping alone does not clear the flag** — it changes *where the bytes live*, not *where the return address points*. The return address is still the private trampoline that called into the stomped region.
+
+**The fix is: make the process-creation call originate from a frame whose return address resolves to a loaded module.** This requires:
+
+1. A **file-backed image section** (fixes `0xC0000022`, provides a module-listed mapping).
+2. A **call-site inside that mapped image** (e.g. patched export prologue) that the loader invokes normally.
+3. The payload's process-creation API is **`CreateProcessW`**, not `WinExec` (defeats Rule 2's symbol match).
+4. The sacrificial DLL is chosen so its name is **not** in Rule 1's six `call_stack_summary` templates (e.g. `bcrypt.dll`, `win32u.dll`, `combase.dll` — none appear in the templates).
+
+With (1)–(4), the call stack at `CreateProcessW` time is:
+```
+ntdll.dll | kernelbase.dll | kernel32.dll | kernel32.dll!CreateProcessW | <sacrificial>.dll!<export>
+```
+- `call_stack_contains_unbacked` → **false** (all frames module-backed) → Rule 1 stage-2 and Rule 2 both fail at condition (1).
+- No `WinExec` symbol → Rule 2 condition (3) fails.
+- Summary contains `<sacrificial>.dll`, not matching any template → Rule 1 condition (2) fails.
+
+**Defense-in-depth:** even if the kernel still flags the *trampoline's* origin as unbacked due to the `jmp` from the patched prologue, the summary will be `<sacrificial>.dll|Unbacked` — **not** `kernel32.dll|Unbacked` — so Rule 2's substring match still fails.
+
+---
+
+## Recommended Iteration 3 Strategy
+
+**Technique:** `threadless_injection` (user-preferred) composed with `module_stomping_section_mapping`, **corrected**:
+
+1. **Fix `NtCreateSection`**: open the sacrificial DLL with `CreateFileW(path, GENERIC_READ|GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL)`, pass that handle, request `SECTION_MAP_READ|SECTION_MAP_EXECUTE|SECTION_MAP_WRITE`, `AllocationAttributes = SEC_IMAGE`. Do **not** pass `NULL` FileHandle with `SEC_IMAGE`.
+2. **Choose a sacrificial DLL not in the templates**: `C:\Windows\System32\bcrypt.dll` (signed, loaded by nearly every process, export `BCryptGenRandom` is a good prologue to patch — it is called rarely enough to be safe, and its name never appears in the rule templates).
+3. **Patch the export prologue** with a `jmp` to the payload (write via the writable image view obtained by mapping with `SEC_IMAGE` + `SECTION_MAP_WRITE`, or via `NtProtectVirtualMemory` on the `.text` page — the write itself is not what the rules monitor; the *call stack at process-creation time* is).
+4. **Invoke the patched export normally** from the loader's `main` thread. The payload then runs with a **module-backed caller frame**.
+5. **Payload uses `CreateProcessW`** (not `WinExec`) to spawn the observable child. This is a payload-side change — `calc.bin` must be regenerated or the loader must wrap it; if `calc.bin` is fixed as `WinExec`-based, the trampoline still defeats Rule 2's *`kernel32.dll|Unbacked`* adjacency because the frame above `WinExec` is `<sacrificial>.dll`, not `Unbacked`.
+6. **Do not** use `EnumSystemLocalesEx` or any `Enum*` callback as the trigger — those produce the exact `kernel32.dll|Unbacked` chain Rule 2 hunts.
+
+**Expected outcome:** `call_stack_contains_unbacked == false` at process-creation time → both rules fail their primary predicate. Residual risk: if the kernel still tags the *trampoline* frame as unbacked, the summary becomes `<sacrificial>.dll|Unbacked`, which matches neither Rule 1's templates nor Rule 2's `*kernel32.dll|Unbacked*` substring.
+
+**Fallback if the trampoline still shows unbacked:** combine with `thread_stack_spoofing` — overwrite the return address on the stack at the moment of the `CreateProcessW` call so the frame above `kernel32.dll!CreateProcessW` points into `ntdll.dll`'s `.text` (a legitimate `ret` gadget). This is the documented counter to `call_stack_contains_unbacked` and is orthogonal to the stomping fix.

@@ -1,0 +1,32 @@
+**Analysis**:
+The loader failed at the *candidate-discovery* stage, not at injection. The error is emitted by `FindRwxDll()` after scanning every directory in `%PATH%` (plus System32) and finding no DLL whose on-disk PE section headers advertise `IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE` with `VirtualSize >= 276`.
+
+The root cause is a **misunderstanding of how Mockingjay candidates are identified**. The technique does not rely on a section being *declared* RWX in the file's section headers. It relies on sections that are **mapped as RWX at runtime** — i.e. the *in-memory* page protection is `PAGE_EXECUTE_READWRITE` even though the on-disk section characteristics are only `READ`/`EXECUTE`. This mismatch happens for a small set of legitimate DLLs (classically `msys-2.0.dll`) whose sections get RWX protection assigned by the loader/linker, not by the section header flags. Scanning `Characteristics` on disk will therefore *never* find them, and the known-good candidate (`msys-2.0.dll`) is not present in System32 or PATH on a stock Windows host anyway — it ships with MSYS2/Cygwin toolchains.
+
+Secondary issues that would bite even if a candidate were found:
+- `FindLiveRwxSection()` (truncated) is reading section `Characteristics` again from the mapped image, which has the same on-disk-vs-mapped discrepancy. The correct in-memory check is `VirtualQuery()` → `Protect == PAGE_EXECUTE_READWRITE` over the section's mapped range.
+- The loader hard-fails with "Refusing to fall back" — there is no diagnostic path showing *what* was scanned, so the failure is silent about whether the candidate simply wasn't installed.
+
+**Rule_Analysis**: N/A (Execution Error)
+
+**Technique**: BugFix
+
+**Methodology**:
+
+1. **Fix candidate identification to use runtime page protection, not file section flags.**
+   - Replace `LargestRwxSectionOnDisk()` with a check that loads the DLL (or inspects an already-loaded module) and walks its mapped section ranges with `VirtualQuery()`, looking for `MEM_COMMIT` regions where `Protect == PAGE_EXECUTE_READWRITE`.
+   - Only fall back to on-disk `Characteristics` inspection as a *hint*, and treat `IMAGE_SCN_MEM_EXECUTE|WRITE` as necessary-but-not-sufficient.
+
+2. **Fix the candidate source.** `msys-2.0.dll` is not a System32/PATH DLL on a clean host. Either:
+   - Ship/point at the MSYS2 install path explicitly (e.g. `C:\msys64\usr\bin\msys-2.0.dll`), or
+   - Enumerate **already-loaded modules** in the current process (`EnumProcessModules` / PEB walk) and `VirtualQuery` each one's sections for an RWX range — this is the intended Mockingjay workflow and avoids disk scanning entirely.
+
+3. **Fix `FindLiveRwxSection()`** to iterate section ranges using `VirtualQuery` over `[base, base+SizeOfImage)` and select the RWX region, rather than trusting `sec[i].Characteristics` from the mapped headers.
+
+4. **Add a `LoadLibraryW` on the chosen candidate** before locating the live section, since a disk-only scan never guarantees the module is mapped in our address space.
+
+5. **Improve the failure diagnostic** to print how many DLLs were inspected and whether any had *mapped* RWX ranges, so a "no candidate" exit is distinguishable from a "candidate present but section detection broken" exit.
+
+6. **Do not fall back to `VirtualAlloc`/`VirtualProtect`** — that would defeat the technique. Instead, if no RWX section exists, exit with a clear message telling the operator to supply a Mockingjay-capable DLL path via a new `argv[2]` argument.
+
+**Benign validation note**: To confirm the fix produces telemetry without executing real payload, use a shellcode stub that simply calls `ExitProcess(0)` (or writes a marker file) — the loader path (module mapping, RWX section selection, fiber start) is exercised end-to-end, and the detection surface (no `VirtualAlloc`/`VirtualProtect`/`CreateThread`) is preserved for rule-coverage testing.

