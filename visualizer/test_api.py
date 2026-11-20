@@ -8,7 +8,7 @@ def test_api():
         # 1. Test Root
         print(f"Checking {BASE_URL}...")
         resp = requests.get(BASE_URL)
-        if resp.status_code == 200 and "<!DOCTYPE html>" in resp.text:
+        if resp.status_code == 200 and "<!doctype html>" in resp.text.lower():
             print("[PASS] Root URL serves HTML")
         else:
             print(f"[FAIL] Root URL returned {resp.status_code}")
