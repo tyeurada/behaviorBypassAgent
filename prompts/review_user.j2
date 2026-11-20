@@ -1,0 +1,28 @@
+# Code Review Task
+
+## Strategy Plan (The "Spec")
+The code was generated to fulfill this strategy:
+{{ ai_plan[:2000] }}... [truncated]
+
+## Current Code (Iteration {{ iteration }})
+```{{ code_block_tag }}
+{{ current_code }}
+```
+
+## Instructions
+1. **Analyze**: Check the code for Syntax, Path/Environment errors, and Strategy Compliance.
+2. **Fix**: Rewrite the code to fix any identified issues.
+   - **Specifcally**: Check library loads for hardcoded versioned paths. Fix them to be generic.
+3. **Report**: Summarize your findings.
+
+## Output Format
+### REVIEW_ANALYSIS
+[Bulleted list of findings. E.g.]
+- verified syntax: OK
+- verified paths: FIXED (Corrected hardcoded .NET path to generic)
+- verified strategy: OK (Implements module stomping)
+
+### FIXED_CODE
+```{{ code_block_tag }}
+{{ comment_prefix }} Your fixed (or original) {{ lang_name }} here
+```

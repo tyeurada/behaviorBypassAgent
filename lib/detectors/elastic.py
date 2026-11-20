@@ -86,18 +86,24 @@ class ElasticDetector(Detector):
             self.client = None
     
     def is_available(self) -> bool:
-        """Check if Elasticsearch is available."""
+        """Check if Elasticsearch is available.
+
+        Uses a size-0 search on the alerts index instead of cluster info:
+        read-only API keys (e.g. Elastic Cloud 'viewer' role) are denied
+        cluster:monitor privileges but can still query alerts, which is all
+        this detector needs.
+        """
         if not self.client:
             return False
-        
+
         try:
-            # Try to get cluster info instead of just ping for better error messages
-            info = self.client.info()
+            self.client.search(
+                index=self.index_pattern,
+                size=0,
+                query={"match_all": {}},
+            )
             if self.debug:
-                print(
-                    f"[Elastic] Connected successfully to {info.get('name', 'unknown')} "
-                    f"(version {info.get('version', {}).get('number', 'unknown')})"
-                )
+                print(f"[Elastic] Alerts index reachable: {self.index_pattern}")
             return True
         except Exception as e:
             print(f"[Elastic] Connection error: {type(e).__name__}: {e}")

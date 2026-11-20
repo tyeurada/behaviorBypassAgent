@@ -1,0 +1,66 @@
+# Shellcode Loader Generation - Iteration 1
+**Target Programming Language: {{ lang_name }}**
+
+## Shellcode Information
+- File path: {{ shellcode_path }}
+- Size: {{ shellcode_size }} bytes
+- Architecture: 64-bit (x64)
+- Format: raw binary
+- Entry point: start of buffer
+
+## CRITICAL Requirements
+Generate a Windows 64-bit shellcode loader in {{ lang_name }} that:
+1. **File-based loading**: Read shellcode from the first argument ({{ args_name }}) - DO NOT hardcode bytes
+2. **EDR evasion**: Bypass all detected Elastic rules
+
+
+## File Reading Template (you can modify this):
+```{{ code_block_tag }}
+{{ file_tpl }}
+```
+
+
+## First Iteration
+Generate a basic but functional loader that:
+1. Reads shellcode from file
+2. Uses the requested/enabled memory allocation technique from the available techniques list. 
+   - You may choose a more advanced technique if you are confident it is robust and enabled.
+3. Establishes a working baseline for further evasion improvements
+
+IMPORTANT: The loader MUST read the shellcode from the file path provided as arguments.
+Do NOT hardcode any shellcode bytes.
+
+
+## Available Evasion Techniques (Reference)
+The following techniques are available in your arsenal. You are not forced to use them, but they are options to consider if they help bypass the specific rules detected:
+
+### Memory Techniques
+{{ validation_patterns_block }}
+{{ preferred_instruction_block }}
+{% if techniques_kb_block %}
+
+## Techniques Knowledge Base
+{{ techniques_kb_block }}
+{% endif %}
+
+## Output Format
+Provide your response in this format:
+
+### EXPLANATION
+Step-by-step reasoning for your changes:
+1. Analyze the failure/detection (what specifically triggered it?)
+2. Explain the new evasion strategy (why will this bypass the specific rule/error?)
+3. List the techniques selected and why
+
+### TECHNIQUES_USED
+- Technique1
+- Technique2
+
+### CODE
+```{{ code_block_tag }}
+{{ comment_prefix }} Your complete, compilable {{ lang_name }} code here
+```
+
+Make sure the code:
+1. Is complete and ready to execute or compile on Windows
+2. **CRITICAL: Reads shellcode from file argument - DO NOT embed shellcode bytes**

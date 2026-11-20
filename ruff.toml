@@ -1,0 +1,20 @@
+# Ruff formatter / linter configuration
+# The codebase uses long prompt strings and loose line lengths, so we keep
+# a generous limit and only enable a conservative lint rule set.
+line-length = 120
+target-version = "py310"
+exclude = [
+    "output/",
+    "windowsBehaviorRules/",
+    ".venv/",
+    ".local/",
+]
+
+[lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+    "E501",  # line too long (managed by formatter, prompts exceed limits)
+]
+
+[format]
+quote-style = "preserve"

@@ -1,0 +1,48 @@
+# Shellcode Loader Generation - Iteration {{ iteration }}
+**Target Programming Language: {{ lang_name }}**
+
+## Previous Code (Iteration {{ iteration - 1 }})
+```{{ code_block_tag }}
+{{ previous_code }}
+```
+
+{{ diagnostic_info }}
+
+## Strategy Plan (from Analysis Agent)
+The previous code was detected or failed. Check the Strategy Plan below:
+
+{{ ai_plan }}
+
+## Available Evasion Techniques (Reference)
+The following techniques are available in your arsenal. You may switch to a different technique if the current one is fundamentally broken:
+
+### Memory Techniques
+{{ validation_patterns_block }}
+{{ preferred_instruction_block }}
+{% if techniques_kb_block %}
+
+## Techniques Knowledge Base
+{{ techniques_kb_block }}
+{% endif %}
+
+## Task
+Your primary objective is to develop a functional code snippet that achieves the Goal by strictly adhering to the Strategy Plan provided by the Analysis Agent.
+
+1. Error & Detection Remediation: If the previous execution resulted in errors or security detections, you must prioritize resolving these issues using the Diagnostic Info provided.
+2. Implementation: Translate the Analysis Agent’s advice into optimized, executable code in {{ lang_name }}.
+3. Refinement: Ensure the logic specifically addresses the bypass or execution requirements outlined in the plan to prevent further failures.
+Use the Diagnostic Info above to pinpoint specific lines or logic errors.
+
+Provide the full implementation in the ### CODE block. 
+
+## Output Format
+### THEORETICAL_ANALYSIS
+[Explain the fix and new strategy]
+
+### TECHNIQUES_USED
+[List techniques]
+
+### CODE
+```{{ code_block_tag }}
+{{ comment_prefix }} Implemented code in {{ lang_name }} based on Analysis Agent's advice
+```

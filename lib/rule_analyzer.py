@@ -6,6 +6,16 @@ from pathlib import Path
 from typing import Optional, Dict, List
 import tomli
 
+# Words that carry no rule-identifying signal in alert names/descriptions
+# (Elastic meta-alert boilerplate, generic security terms).
+_KEYWORD_STOPWORDS = {
+    "a", "an", "the", "of", "by", "for", "to", "in", "on", "at", "from", "or",
+    "and", "via", "with", "that", "this", "any", "has", "was", "is", "be",
+    "alert", "detection", "detected", "malware", "malicious", "behavior",
+    "each", "time", "generates", "received", "potential", "possible",
+    "suspicious", "rule", "call", "calls", "process", "using",
+}
+
 
 class BehaviorRule:
     """Represents an Elastic behavior detection rule."""
@@ -219,17 +229,20 @@ class BehaviorRuleAnalyzer:
         return None
     
     def find_rules_by_keywords(self, keywords: List[str]) -> List[BehaviorRule]:
-        """Find rules matching any of the keywords.
-        
+        """Find rules matching any of the keywords, best match first.
+
         Args:
             keywords: List of keywords to search for
-            
+
         Returns:
-            List of matching rules
+            List of matching rules sorted by distinct keyword hit count (desc)
         """
-        matching_rules = []
         keywords_lower = [k.lower() for k in keywords]
-        
+        # Multi-keyword queries need >=2 hits — a single coincidental substring
+        # (e.g. "custom", "thing") should not qualify as a match.
+        min_hits = min(len(keywords_lower), 2)
+        scored = []
+
         for rule in self.rules.values():
             # Search in name, description, and query
             searchable = ' '.join([
@@ -237,11 +250,13 @@ class BehaviorRuleAnalyzer:
                 rule.description.lower(),
                 rule.query.lower()
             ])
-            
-            if any(keyword in searchable for keyword in keywords_lower):
-                matching_rules.append(rule)
-        
-        return matching_rules
+
+            hits = sum(1 for keyword in keywords_lower if keyword in searchable)
+            if hits >= min_hits:
+                scored.append((hits, rule))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [rule for _, rule in scored]
     
     def analyze_detection(self, detection_result) -> Optional[Dict]:
         """Analyze a detection result and find matching rule.
@@ -263,36 +278,53 @@ class BehaviorRuleAnalyzer:
 
         target_details = get_val(detection_result, 'details', {})
         target_rule_name = get_val(detection_result, 'rule_name')
-        target_description = get_val(detection_result, 'description')
         
         rule = None
         
         # PRIMARY: Try to find by rule ID (most reliable)
+        rule_id = None
         if target_details and 'rule_id' in target_details:
             rule_id = target_details['rule_id']
             rule = self.find_rule_by_id(rule_id)
             if rule:
                 print(f"[Rule Analyzer] Match by ID: {rule_id} -> {rule.name}")
-        
+            else:
+                # A known remote rule ID with no local TOML (e.g. memory-threat
+                # engine alerts) — keyword fallbacks would misattribute to an
+                # unrelated rule, so report unmatched instead.
+                print(f"[Rule Analyzer] Rule ID {rule_id} not in local TOMLs — skipping keyword fallback")
+                return {
+                    'rule_found': False,
+                    'rule_id': rule_id,
+                    'message': (
+                        f"Alert rule ID {rule_id} is not in the local TOML set "
+                        f"(remote-side rule: {target_rule_name or 'unknown'})"
+                    )
+                }
+
         # FALLBACK 1: Try to find by rule name
         if not rule and target_rule_name:
             rule = self.find_rule_by_name(target_rule_name)
             if rule:
                 print(f"[Rule Analyzer] Match by name: {target_rule_name}")
         
-        # FALLBACK 2: Try to find by keywords from the detection
+        # FALLBACK 2: keyword match on the informative part of the alert name.
+        # Elastic meta-alerts use generic names like "Malware Detection Alert" or
+        # "Malicious Behavior Detection Alert: <rule>", with boilerplate
+        # descriptions — only the part after ':' carries a real rule name.
         if not rule:
+            name_tail = (target_rule_name or "").split(":")[-1]
             keywords = []
-            if target_description:
-                keywords.extend(target_description.split()[:5])
-            if target_rule_name:
-                keywords.extend(target_rule_name.split())
-            
+            for w in name_tail.split():
+                w = w.strip(".,;()").lower()
+                if len(w) >= 4 and w not in _KEYWORD_STOPWORDS:
+                    keywords.append(w)
+
             if keywords:
                 matching_rules = self.find_rules_by_keywords(keywords)
                 if matching_rules:
                     rule = matching_rules[0]  # Use best match
-                    print(f"[Rule Analyzer] Match by keywords: {', '.join(keywords[:3])}")
+                    print(f"[Rule Analyzer] Match by keywords: {', '.join(keywords[:3])} -> {rule.name}")
         
         if rule:
             return {

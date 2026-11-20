@@ -2,6 +2,10 @@ ai:
   anthropic:
     model: claude-3-opus-20240229
     temperature: 0.7
+  deepseek:
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    temperature: 0.7
   gemini:
     available_models:
     - models/gemini-2.5-flash
@@ -16,7 +20,13 @@ ai:
   openai:
     model: gpt-4
     temperature: 0.7
-  provider: gemini
+  openai_compatible:
+    api_key_env: OPENAI_COMPATIBLE_API_KEY
+    base_url: http://localhost:11434/v1
+    max_tokens: 8192
+    model: ''
+    temperature: 0.7
+  provider: openai_compatible
   rate_limit_wait_seconds: 5
 behavior_rules:
   directory: ./windowsBehaviorRules
@@ -34,6 +44,24 @@ compiler:
       APIs like `VirtualProtect` to avoid pointer truncation.
     - Do not print raw bytes or parsed memory strings (like PE section names) to the
       console to avoid UnicodeEncodeError on Windows.
+    c:
+    - Emit one complete compilable translation unit including ALL required
+      headers; no stubs, TODOs, or pseudocode. Verify braces balance before
+      finishing the file.
+    - Use `int main(int argc, char* argv[])` and read the payload path from argv[1].
+      If you choose wmain/wWinMain (wide args), you MUST use wide CRT functions
+      (_wfopen, wcslen, wprintf); passing wchar_t* argv to narrow functions like
+      fopen/printf %s reads garbage such as just "C".
+    - The target is x64 Windows and the code must compile cleanly under MSVC
+      cl.exe. Do not use GCC-only extensions (e.g. __attribute__) and do not use
+      C++ constructs.
+    - Prefer documented Win32 APIs from <windows.h>. If undocumented NT APIs
+      (Nt*/Zw*/Rtl* functions or types like OBJECT_ATTRIBUTES/IO_STATUS_BLOCK) are
+      required, you MUST declare every typedef, enum, and function prototype yourself;
+      <winternl.h> alone does NOT define most of them.
+    - Keep helper declarations above their call sites and ensure every identifier
+      used is declared; cl.exe does not tolerate forward references to undeclared
+      functions.
   language: csharp
   mingw:
     path: C:\mingw64\bin\gcc.exe
@@ -61,6 +89,7 @@ detectors:
   - elastic
   - defender
 evasion_techniques:
+  knowledge_dir: ./techniques
   memory:
   - description: Allocate memory with PAGE_EXECUTE_READWRITE (RWX) permissions directly.
       The simplest and most straightforward method of running shellcode.
@@ -75,10 +104,46 @@ evasion_techniques:
   - description: 'Load legitimate DLL (ex: mshtml.dll, edgehtml.dll. NOT kernel32.dll),
       locate executable section, overwrite with shellcode. Uses existing executable
       memory.'
-    enabled: false
+    enabled: true
     name: module_stomping
     trigger: unbacked memory execution, private memory execution, process creation
       via shellcode
+  - description: Module Stomping via NtCreateSection(SEC_IMAGE)+NtMapViewOfSection.
+      Maps the sacrificial DLL as an image section (file-backed, RX) without a LoadLibrary
+      event; shellcode overwrites the mapped .text in place. Keeps the module off
+      the PEB loader list and makes call-stack module resolution point at a legitimate
+      DLL path.
+    enabled: true
+    name: module_stomping_section_mapping
+    trigger: library_load events, unbacked/private memory in call stack, module list
+      scans
+  - description: 'Module Stomping + Fiber: stomp a mapped image section, then start
+      execution via CreateFiber/SwitchToFiber so no thread-creation telemetry is emitted.
+      Workshop-verified combination that produced no Elastic alerts.'
+    enabled: true
+    name: module_stomping_fiber
+    trigger: thread creation detection, unbacked memory in call stack
+  - description: 'Thread Hijacking (local): suspend an existing thread in the own
+      process (e.g. created earlier or via CreateThread on a decoy), overwrite its
+      RIP with the payload address via SetThreadContext, resume. Avoids a fresh thread-start
+      pointing at unbacked memory.'
+    enabled: true
+    name: thread_hijacking_local
+    trigger: thread creation call stack rules, CreateThread telemetry
+  - description: 'APC execution (self-injection): QueueUserAPC/NtQueueApcThread the
+      payload address onto an alertable thread in the same process, then enter an
+      alertable wait (SleepEx/WaitForSingleObjectEx). No new thread is created.'
+    enabled: true
+    name: apc_injection
+    trigger: CreateThread/CreateRemoteThread detection, remote injection rules
+  - description: 'Threadless Injection (local variant): patch an existing function
+      in a loaded module (or an unused callback slot, e.g. window proc) so the payload
+      runs on a normal call path instead of a new thread. Pure-C feasible when targeting
+      the own process; remote-process variants need handle ops and widen the detection
+      surface.'
+    enabled: true
+    name: threadless_injection
+    trigger: thread creation rules, call stack origin checks
   - description: Use HeapCreate + HeapAlloc instead of VirtualAlloc. Less commonly
       monitored by EDR.
     enabled: true
@@ -100,36 +165,155 @@ evasion_techniques:
     enabled: true
     name: thread_stack_spoofing
     trigger: Stack walking, ETW ThreadStart, GetThreadContext calls
+  - description: 'DLL side-loading: drop a payload-bearing DLL next to a signed
+      binary that imports it, so execution flows under a trusted image name.'
+    enabled: true
+    name: dll_side_loading
+    trigger: image load detection, unsigned module loads
+  - description: 'Mockingjay: reuse an existing PAGE_EXECUTE_READWRITE section
+      inside a signed DLL (e.g. msys-2.0.dll) — no VirtualAlloc/VirtualProtect
+      at all; writes land in image-backed executable memory.'
+    enabled: true
+    name: mockingjay
+    trigger: VirtualProtect events, unbacked memory in call stack, private
+      memory execution
+  - description: 'Early Bird APC: spawn a signed host process suspended and queue
+      an APC before its first thread runs, so the payload executes during process
+      init — potentially before userland EDR hooks install.'
+    enabled: true
+    name: early_bird_apc
+    trigger: suspended process creation rules, cross-process alloc/write telemetry
+  - description: 'NTDLL unhooking: restore ntdll .text bytes from KnownDlls or a
+      clean on-disk copy to remove inline EDR hooks before running the payload.
+      Auxiliary step — combine with a staging technique.'
+    enabled: true
+    name: ntdll_unhooking
+    trigger: userland hook detection, hooked NT API telemetry
+  - description: 'Direct/indirect syscalls (HellsGate-style): resolve SSNs from
+      ntdll stubs and invoke the kernel without passing through hooked ntdll
+      prologues. Does not affect kernel-level telemetry.'
+    enabled: true
+    name: direct_syscall
+    trigger: hooked NT API telemetry, userland API interception
+  - description: 'Remote process hollowing (classic T1055): CreateProcess suspended,
+      NtUnmapViewOfSection the original image, write replacement code, redirect
+      entry, resume. Baseline to measure Elastic hollowing-rule coverage.'
+    enabled: true
+    name: process_hollowing_remote
+    trigger: suspended process creation, unmap events, cross-process writes
   - description: Execute sensitive APIs (NtCreateThread, etc.) through 'gadgets' in
       legitimate DLLs like ntdll.dll or kernel32.dll to evade return address filtering.
-    enabled: false
+    enabled: true
     name: proxy_function_calls
     trigger: Direct syscall detection, RIP auditing
   - description: Create file transaction, write shellcode, rollback transaction but
       keep section handle. Execute from transacted memory.
-    enabled: false
+    enabled: true
     name: process_doppelganging
     trigger: file-based detection, process creation monitoring
   - description: Use legitimate callback functions (EnumWindows, EnumSystemLocales,
       etc.) with shellcode address.
-    enabled: false
+    enabled: true
     name: callback_execution
     trigger: direct thread creation, CreateThread detection
   - description: Map same DLL twice - once legitimate, once modified. Use legitimate
       handle for cover.
-    enabled: false
+    enabled: true
     name: module_overloading
     trigger: module integrity checks
+  - description: 'Atom bombing: store shellcode in the global atom table, then
+      NtQueueApcThread a GlobalGetAtomNameW call into a target thread so the
+      atom content is written inside the target process — no WriteProcessMemory.'
+    enabled: true
+    name: atom_bombing
+    trigger: cross-process write detection, remote injection rules
+  - description: 'TLS callback execution: register a PIMAGE_TLS_CALLBACK in the
+      .CRT$XL* section so the payload runs inside LdrpCallTlsInitializers before
+      main — no thread/APC creation.'
+    enabled: true
+    name: tls_callback
+    trigger: thread creation detection, entry-point monitoring
+  - description: 'PROPagate: store payload/subclass header in a target window''s
+      property list and trigger it via window messages — injection through the
+      windowing subsystem, not process APIs.'
+    enabled: true
+    name: propagate
+    trigger: cross-process injection, remote alloc/write telemetry
+  - description: 'Process ghosting: create a file, mark delete-pending, write a
+      payload PE, build a SEC_IMAGE section from the delete-pending handle, then
+      close — a process whose image has no on-disk file at all.'
+    enabled: true
+    name: process_ghosting
+    trigger: file-scan detection, image section telemetry
+  - description: 'SetWindowsHookEx injection: the OS itself loads our hook DLL
+      into a target GUI process when it pumps messages — no remote alloc/write
+      APIs involved.'
+    enabled: true
+    name: windows_hook_injection
+    trigger: cross-process injection, module load monitoring
+  - description: 'SetThreadContext + gadget: redirect a thread''s RIP into a
+      jmp/call gadget inside a signed module so the first stack frame is
+      module-backed even though control reaches the payload next.'
+    enabled: true
+    name: context_gadget
+    trigger: call stack origin checks, unbacked entry frame rules
+  - description: 'Exception-dispatched execution: a VEH handler rewrites
+      ContextRecord->Rip to the payload and returns CONTINUE_EXECUTION —
+      control transfer happens inside KiUserExceptionDispatcher.'
+    enabled: true
+    name: exception_dispatch_exec
+    trigger: thread/APC/context-manipulation telemetry
+  - description: 'Remote section mapping: write payload in our own view of a
+      section object, then NtMapViewOfSection the same section into the target —
+      no VirtualAllocEx/WriteProcessMemory pair.'
+    enabled: true
+    name: remote_section_mapping
+    trigger: remote alloc/write rules, cross-process injection
+  - description: 'Signed host execution: drop a payload DLL and run it under
+      rundll32/regsvr32 — the hosting process is a signed system binary, which
+      may break unsigned-parent rule sequences.'
+    enabled: true
+    name: rundll32_hosting
+    trigger: unsigned parent rules, LOLBin abuse monitoring
+  - description: 'Suspended-process section write: spawn signed host suspended,
+      NtMapViewOfSection a payload section into it, redirect the main thread —
+      hollowing-style exec without the loud NtUnmapViewOfSection call.'
+    enabled: true
+    name: suspended_section_exec
+    trigger: unmap detection, remote section map rules
   - description: Split shellcode across multiple small allocations. Reconstruct at
       runtime. Evades signature scanning.
-    enabled: false
+    enabled: true
     name: scattered_allocation
     trigger: large memory allocation, shellcode signatures
   - description: Allocate as PAGE_READONLY, use hardware breakpoint or exception handler
       to execute. Very stealthy.
-    enabled: false
+    enabled: true
     name: read_only_trick
     trigger: executable memory allocation
+  - description: 'Inherited-Handle Section APC: pass a payload-carrying section into
+      a suspended child via PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the kernel duplicates
+      the handle at process creation — no VirtualAllocEx/WriteProcessMemory/remote-map
+      event exists. The child maps the section locally; trigger via early-bird APC
+      or gadget/context redirect. Project-original composition.'
+    enabled: true
+    name: inherited_section_apc
+    trigger: remote write/map rules, remote process injection via mapping
+  - description: 'Self-Reflection Execution: RtlCreateProcessReflection/RtlCloneUserProcess
+      forks our own process after local staging — the payload is inherited at birth
+      (COW), so no remote alloc/write/map call exists at all. StartRoutine option
+      runs the payload inside the clone without a CreateThread-named call.'
+    enabled: true
+    name: self_reflection_exec
+    trigger: remote write/map rules, thread creation detection, staging telemetry
+  - description: 'API Surface Translation (meta): substitute every fingerprinted
+      Win32 call with a documented modern twin (VirtualAlloc2, MapViewOfFile3,
+      NtMapViewOfSectionEx, VirtualProtectFromApp, CreateFile2, NtCreateThreadEx
+      flags, placeholder APIs) — tests whether rules match api.name strings.
+      Applied on top of other techniques; one-iteration test per rule family.'
+    enabled: true
+    name: api_surface_translation
+    trigger: process.Ext.api.name based rules, API call sequencing rules
   preferred_techniques: []
 execution:
   max_iterations: 15
@@ -145,7 +329,7 @@ execution:
     process:
       name: CalculatorApp.exe
       timeout: 15
-    type: network
+    type: process
   wait_after_execute: 150
 output:
   diff_format: unified

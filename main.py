@@ -1,11 +1,34 @@
-
-import sys
-import os
 import argparse
+import os
+import sys
+
 from dotenv import load_dotenv
 
 from core.graph import create_graph
+
 # import config  # If we need global config
+
+_SENSITIVE_PARTS = {"key", "secret", "password", "token", "host", "url", "endpoint", "apikey"}
+
+
+def _mask_secrets(obj):
+    """Recursively mask values whose key looks like a credential or endpoint.
+    Matching is per word part (e.g. api_key, base_url) so max_tokens etc. survive.
+    *_env keys hold env var names, not secrets."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            kl = str(k).lower().replace("-", "_")
+            parts = set(kl.split("_"))
+            if not kl.endswith("_env") and parts & _SENSITIVE_PARTS:
+                out[k] = "***"
+            else:
+                out[k] = _mask_secrets(v)
+        return out
+    if isinstance(obj, list):
+        return [_mask_secrets(v) for v in obj]
+    return obj
+
 
 def main():
     parser = argparse.ArgumentParser(description="Evasive AI Agent (LangGraph)")
@@ -13,25 +36,29 @@ def main():
     parser.add_argument("--iterations", "-i", type=int, default=4, help="Maximum number of iterations")
     parser.add_argument("--check-elastic", action="store_true", help="Check Elastic connection and last 10 mins alerts")
     parser.add_argument("--session-dir", required=False, help="Explicit session directory path")
-    
+
     args = parser.parse_args()
-    
+
     # Load environment
     load_dotenv()
-    if not os.getenv("GEMINI_API_KEY"):
-        print("Error: GEMINI_API_KEY not set in environment or .env file")
-        return
-    
+
+    # Avoid cp932 console crashes on chars like em-dash in LLM output (Windows).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
     # Check Elastic Connection if requested
     if args.check_elastic:
         print("\n--- Checking Elastic Connection ---")
-        from lib.detectors.elastic import ElasticDetector
         from core.utils import load_config
-        
+        from lib.detectors.elastic import ElasticDetector
+
         config = load_config()
         elastic_config = config.get('detectors', {}).get('elastic', {})
         detector = ElasticDetector(elastic_config)
-        
+
         if detector.is_available():
             print("[SUCCESS] Connected to Elastic!")
             print("Fetching alerts for last 10 minutes...")
@@ -43,7 +70,25 @@ def main():
             print("[FAILED] Could not connect to Elastic.")
             print("Please check your .env file or config.yaml.")
         return
-    
+
+    # Verify the API key for the configured provider (only needed for agent runs)
+    from core.utils import load_config
+    from lib.llm_factory import api_key_required, get_provider, required_env_var
+
+    try:
+        cfg = load_config()
+        provider = get_provider(cfg)
+        provider_cfg = (cfg.get("ai", {}) or {}).get(provider, {}) or {}
+        env_var = required_env_var(provider, provider_cfg)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+    if not os.getenv(env_var):
+        if api_key_required(provider):
+            print(f"Error: {env_var} not set in environment or .env file (provider={provider})")
+            return
+        print(f"Warning: {env_var} not set; using a placeholder key (OK for local servers that ignore auth)")
+
     if not args.shellcode:
         parser.error("The following arguments are required: --shellcode/-s (unless --check-elastic is used)")
 
@@ -52,33 +97,35 @@ def main():
         print(f"Error: Shellcode file not found at {shellcode_path}")
         return
 
-    print(f"Starting Evasive AI Agent...")
+    print("Starting Evasive AI Agent...")
     print(f"Shellcode: {shellcode_path}")
     print(f"Max Iterations: {args.iterations}")
-    
+
     # Generate Session Directory
     if args.session_dir:
         session_dir = os.path.abspath(args.session_dir)
     else:
         import datetime
+
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = os.path.join("output", timestamp)
     os.makedirs(session_dir, exist_ok=True)
     print(f"Output Directory: {session_dir}")
-    
-    # Copy configuration to session dir
-    import shutil
-    config_src = os.path.join("config", "config.yaml")
+
+    # Save the effective config (base + config.local.yaml merged) to session dir.
+    # Credential-looking values are masked; real credentials come from env/.env anyway.
+    import yaml
+
     config_dest = os.path.join(session_dir, "run_config.yaml")
-    if os.path.exists(config_src):
-        try:
-            shutil.copy2(config_src, config_dest)
-        except Exception as e:
-            print(f"Warning: Could not copy config.yaml to session dir: {e}")
-    
+    try:
+        with open(config_dest, "w", encoding="utf-8") as f:
+            yaml.safe_dump(_mask_secrets(cfg), f, sort_keys=False, allow_unicode=True)
+    except Exception as e:
+        print(f"Warning: Could not write run_config.yaml to session dir: {e}")
+
     # Initialize Graph
     graph = create_graph()
-    
+
     # Initial State
     initial_state = {
         "shellcode_path": shellcode_path,
@@ -86,12 +133,7 @@ def main():
         "iteration": 1,
         "status": "start",
         "history": [],
-        "analysis_report": {
-            "solved_rules": [],
-            "persistent_rules": [],
-            "new_rules": [],
-            "last_failure_reason": None
-        },
+        "analysis_report": {"solved_rules": [], "persistent_rules": [], "new_rules": [], "last_failure_reason": None},
         "current_code": None,
         "detections": [],
         "error": None,
@@ -100,38 +142,39 @@ def main():
         # New Memory Fields
         "approach_tracker": [],
         "iteration_summaries": [],
-        "banned_approaches": []
+        "banned_approaches": [],
     }
-    
+
     # Run Graph
     print("\n--- Agent Loop Started ---\n")
     final_state = None
-    
+
     try:
         # We use invoke to run the graph to completion
         final_state = graph.invoke(initial_state)
-        
+
     except Exception as e:
         print(f"\n[!] Error during execution: {e}")
         import traceback
+
         traceback.print_exc()
         return
 
     print("\n--- Agent Loop Finished ---\n")
-    
+
     # Print Summary
     if final_state:
         status = final_state.get('status', 'unknown')
         iterations = final_state.get('iteration', 0)
         history = final_state.get('history', [])
-        
+
         summary_lines = []
         summary_lines.append(f"Final Status: {status}")
         summary_lines.append(f"Total Iterations: {iterations}")
-        
+
         if status == 'clean' or (history and history[-1]['status'] == 'clean'):
             summary_lines.append("\nSUCCESS! EEDR Bypass Achieved.")
-            
+
             if final_state.get('compile_result'):
                 summary_lines.append(f"Loader Executable: {final_state['compile_result'].get('output_path')}")
         else:
@@ -139,6 +182,7 @@ def main():
             if final_state.get('analysis_report'):
                 summary_lines.append("Final Analysis Report:")
                 import json
+
                 summary_lines.append(json.dumps(final_state['analysis_report'], indent=2))
 
         summary_text = "\n".join(summary_lines)
@@ -152,6 +196,7 @@ def main():
             print(f"Summary saved to {summary_path}")
         except Exception as e:
             print(f"Error saving summary: {e}")
+
 
 if __name__ == "__main__":
     main()
