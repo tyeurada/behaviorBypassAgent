@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getRunStatus, getSessionLogs, startRun, stopRun } from '../api'
+import { getConfig, getRunStatus, getSessionLogs, startRun, stopRun } from '../api'
 import { ConfigEditor } from './ConfigEditor'
 import { CopyButton } from './CopyButton'
 
@@ -88,6 +88,14 @@ export function ControlPanel({ onSessionsChanged }: Props) {
   // Fetch current status once when the panel opens
   useEffect(() => {
     checkRunStatus()
+    getConfig()
+      .then((config) => {
+        const configuredIterations = Number(config.execution?.max_iterations)
+        if (Number.isInteger(configuredIterations) && configuredIterations > 0) {
+          setIterations(configuredIterations)
+        }
+      })
+      .catch((e) => console.error('Error loading max iterations from config:', e))
     return stopPolling
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

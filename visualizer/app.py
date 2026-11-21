@@ -239,7 +239,9 @@ def handle_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
-            return jsonify(config)
+            response = jsonify(config)
+            response.headers['Cache-Control'] = 'no-store'
+            return response
         except Exception as e:
             return jsonify({'error': str(e)}), 500
             

@@ -31,7 +31,7 @@ export function getSessionLogs(sessionId: string): Promise<{ logs?: string; erro
 }
 
 export function getConfig(): Promise<AgentConfig> {
-  return fetchJson('/api/config')
+  return fetchJson(`/api/config?ts=${Date.now()}`, { cache: 'no-store' })
 }
 
 export function saveConfig(config: AgentConfig): Promise<{ status: string }> {

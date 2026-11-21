@@ -33,7 +33,7 @@ def _mask_secrets(obj):
 def main():
     parser = argparse.ArgumentParser(description="Evasive AI Agent (LangGraph)")
     parser.add_argument("--shellcode", "-s", required=False, help="Path to shellcode file")
-    parser.add_argument("--iterations", "-i", type=int, default=4, help="Maximum number of iterations")
+    parser.add_argument("--iterations", "-i", type=int, default=None, help="Maximum number of iterations")
     parser.add_argument("--check-elastic", action="store_true", help="Check Elastic connection and last 10 mins alerts")
     parser.add_argument("--session-dir", required=False, help="Explicit session directory path")
 
@@ -91,6 +91,9 @@ def main():
 
     if not args.shellcode:
         parser.error("The following arguments are required: --shellcode/-s (unless --check-elastic is used)")
+
+    if args.iterations is None:
+        args.iterations = int(cfg.get("execution", {}).get("max_iterations", 4))
 
     shellcode_path = os.path.abspath(args.shellcode)
     if not os.path.exists(shellcode_path):

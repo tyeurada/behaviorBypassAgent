@@ -274,6 +274,10 @@ Analysis: {ana}
 
     # Filter only enabled techniques
     enabled_techniques = [t for t in evasion_techniques if t.get('enabled', False)]
+    enabled_names_lower = {str(t.get('name', '')).lower() for t in enabled_techniques}
+    preferred_techniques = [
+        p for p in (preferred_techniques or []) if str(p).lower() in enabled_names_lower
+    ]
 
     tech_lines = []
     for t in enabled_techniques:
@@ -421,6 +425,10 @@ def generate_code(state: AgentState) -> AgentState:
 
         # Filter enabled techniques
         enabled_techniques = [t for t in evasion_techniques if t.get('enabled', False)]
+        enabled_names_lower = {str(t.get('name', '')).lower() for t in enabled_techniques}
+        preferred_techniques = [
+            p for p in (preferred_techniques or []) if str(p).lower() in enabled_names_lower
+        ]
 
         validation_patterns = []
         for t in enabled_techniques:

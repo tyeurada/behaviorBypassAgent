@@ -41,7 +41,8 @@ def format_techniques_kb(
     """Render KB notes for enabled/preferred techniques as a markdown block.
 
     Only techniques with a matching `<name>.md` file are included. Preferred
-    techniques are listed first.
+    techniques are listed first. Names not present in the enabled set are
+    ignored, including stale preferred-technique settings.
     """
     kb = load_kb(knowledge_dir, config)
     if not kb:
@@ -50,6 +51,10 @@ def format_techniques_kb(
     # Config technique names (e.g. "RW_to_RX") may not match file stems
     # case-sensitively ("rw_to_rx.md"); normalize lookups by lowercase stem.
     kb_by_lower = {stem.lower(): stem for stem in kb}
+    enabled_lower = {str(name).lower() for name in (enabled_names or [])}
+    preferred_names = [
+        name for name in (preferred_names or []) if str(name).lower() in enabled_lower
+    ]
 
     ordered = []
 
@@ -67,10 +72,6 @@ def format_techniques_kb(
             _add(enabled_names)
     else:
         _add(enabled_names)
-        # Also include KB files that have no config entry (reference-only notes).
-        for stem in kb:
-            if stem not in ordered:
-                ordered.append(stem)
 
     preferred_lower = {str(p).lower() for p in (preferred_names or [])}
     blocks = []

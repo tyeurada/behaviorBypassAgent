@@ -1432,8 +1432,13 @@
 
             async function loadConfigSettings() {
                 try {
-                    const res = await fetch('/api/config');
+                    const res = await fetch(`/api/config?ts=${Date.now()}`, { cache: 'no-store' });
                     activeConfig = await res.json();
+                    const configuredIterations = Number(activeConfig.execution?.max_iterations);
+                    if (Number.isInteger(configuredIterations) && configuredIterations > 0) {
+                        document.getElementById('runIterationsSlider').value = configuredIterations;
+                        document.getElementById('runIterationsText').value = configuredIterations;
+                    }
                     renderConfigForm(activeConfig);
                 } catch (e) {
                     console.error("Error loading config:", e);
