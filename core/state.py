@@ -43,6 +43,7 @@ class AgentState(TypedDict):
     
     # Internal retry tracker for crashes/compilation errors
     bug_retries: int
+    max_bug_retries: int
 
     # AI Memory & Strategy Tracking
     # List of approach records: {approach_name, attempts, status, rule_target, iteration_results}

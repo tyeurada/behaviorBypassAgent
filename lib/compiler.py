@@ -149,6 +149,11 @@ class Compiler:
              output_path = (self.output_dir / f"{output_name}.exe").absolute()
         
         try:
+            # Retries reuse the same iteration/output name. Remove an artifact
+            # from a previous attempt so a failed compilation cannot be reported
+            # as successful merely because the old executable still exists.
+            output_path.unlink(missing_ok=True)
+
             # Write source code to session folder
             with open(source_path, 'w', encoding='utf-8') as f:
                 f.write(code)
@@ -201,8 +206,8 @@ echo Compilation successful!
             # Combine stdout and stderr for full output
             full_output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
             
-            # Check if exe was created
-            if output_path.exists():
+            # Require both a successful compiler exit and a new executable.
+            if result.returncode == 0 and output_path.exists():
                 return CompileResult(
                     success=True,
                     output_path=str(output_path),
@@ -210,11 +215,15 @@ echo Compilation successful!
                     stderr=result.stderr
                 )
             else:
+                output_path.unlink(missing_ok=True)
                 return CompileResult(
                     success=False,
                     stdout=result.stdout,
                     stderr=result.stderr,
-                    error=f"Compilation failed - no executable produced.\n\nFull output:\n{full_output}"
+                    error=(
+                        f"Compilation failed (exit code {result.returncode}); "
+                        f"no usable executable produced.\n\nFull output:\n{full_output}"
+                    )
                 )
                 
         except subprocess.TimeoutExpired:
@@ -255,6 +264,10 @@ echo Compilation successful!
             output_path = self.output_dir / f"{output_name}.exe"
         
         try:
+            # See _compile_msvc: retries share this path, so fail closed on a
+            # stale executable from an earlier attempt.
+            output_path.unlink(missing_ok=True)
+
             # Write source code to session folder
             with open(source_path, 'w', encoding='utf-8') as f:
                 f.write(code)
@@ -279,7 +292,7 @@ echo Compilation successful!
                 timeout=60
             )
             
-            if output_path.exists():
+            if result.returncode == 0 and output_path.exists():
                 return CompileResult(
                     success=True,
                     output_path=str(output_path),
@@ -287,11 +300,15 @@ echo Compilation successful!
                     stderr=result.stderr
                 )
             else:
+                output_path.unlink(missing_ok=True)
                 return CompileResult(
                     success=False,
                     stdout=result.stdout,
                     stderr=result.stderr,
-                    error="Compilation failed - no executable produced"
+                    error=(
+                        f"Compilation failed (exit code {result.returncode}); "
+                        "no usable executable produced"
+                    )
                 )
                 
         except subprocess.TimeoutExpired:
@@ -420,6 +437,10 @@ echo Compilation successful!
         output_path = (code_output_dir / f"{output_name}.exe").absolute()
         
         try:
+            # If csc was available on an earlier attempt but not this one, the
+            # executor must not discover and run that previous .exe.
+            output_path.unlink(missing_ok=True)
+
             with open(source_path, 'w', encoding='utf-8') as f:
                 f.write(code)
             
@@ -438,7 +459,7 @@ echo Compilation successful!
                     text=True,
                     timeout=30
                 )
-                if output_path.exists():
+                if result.returncode == 0 and output_path.exists():
                     return CompileResult(
                         success=True,
                         output_path=str(output_path),
@@ -446,9 +467,15 @@ echo Compilation successful!
                         stderr=result.stderr
                     )
                 else:
+                    output_path.unlink(missing_ok=True)
                     return CompileResult(
                         success=False,
-                        error=f"C# Compilation failed: {result.stderr or result.stdout}"
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        error=(
+                            f"C# Compilation failed (exit code {result.returncode}): "
+                            f"{result.stderr or result.stdout}"
+                        )
                     )
             else:
                 # Fallback: mock C# compile successful as a script/dotnet run if csc is missing

@@ -307,6 +307,7 @@ def run_agent():
     
     cmd = [
         sys.executable,
+        '-u',
         str(BASE_DIR / 'main.py'),
         '--shellcode', shellcode_path,
         '--iterations', str(iterations),

@@ -1,3 +1,4 @@
+import ast
 import os
 import time
 from typing import Any
@@ -95,6 +96,7 @@ def initialize_state(state: AgentState) -> AgentState:
         "approach_tracker": [],
         "iteration_summaries": [],
         "banned_approaches": [],
+        "max_bug_retries": state.get("max_bug_retries", 2),
     }
 
 
@@ -508,6 +510,9 @@ def generate_code(state: AgentState) -> AgentState:
     # iteration 1 = Initial Generation (Basic Loader)
     # iteration > 1 = Debugging/Refinement
 
+    ai_plan = state.get('ai_strategy_plan') or 'Produce a minimal functional loader.'
+    previous_code = state.get('current_code') or f"{lang['comment_prefix']} No previous code available"
+
     if iteration == 1:
         base_prompt = render_prompt(
             "generate_iter1",
@@ -523,9 +528,6 @@ def generate_code(state: AgentState) -> AgentState:
             comment_prefix=lang['comment_prefix'],
         )
     else:
-        ai_plan = state.get('ai_strategy_plan', 'No plan provided.')
-        previous_code = state.get('current_code') or f"{lang['comment_prefix']} No previous code available"
-
         base_prompt = render_prompt(
             "generate_iterN",
             iteration=iteration,
@@ -598,18 +600,68 @@ def generate_code(state: AgentState) -> AgentState:
 
         is_max_tokens = str(finish_reason).upper() in ["MAX_TOKENS", "LENGTH", "2"]
         if is_max_tokens:
-            log_debug("  [DEBUG] LLM hit MAX_TOKENS limit! Bouncing to compile_failed state.")
-            return {
-                "status": "compile_failed",
-                "compile_result": {
-                    "success": False,
-                    "error": "[SYSTEM_ERROR] Code generation failed because the LLM exceeded the maximum token limit. The output was truncated. Please rewrite your code to be significantly more concise. Do NOT hardcode massive binary payloads or raw PE files directly into the script. Use dynamic methods instead.",
-                    "stdout": "",
-                    "stderr": "",
-                    "output_path": "",
-                },
-                "current_code": content[:1000] + "\n...[TRUNCATED]...",
-            }
+            # ``length`` is a generation transport condition, not a compiler
+            # result.  Some providers return a complete code block before
+            # reporting it, while others return no visible content at all
+            # after spending the completion budget on reasoning.  Keep a
+            # syntactically complete response; otherwise retry once with only
+            # the context needed to implement the current detection strategy.
+            code_is_complete = bool(code.strip())
+            if target_language in ('python', 'py') and code_is_complete:
+                try:
+                    ast.parse(code)
+                except SyntaxError:
+                    code_is_complete = False
+            elif lang['guidelines_key'] == 'c' and code_is_complete:
+                code_is_complete = not validate_c_source(code)
+            elif lang['guidelines_key'] == 'csharp' and code_is_complete:
+                code_is_complete = code.count('{') == code.count('}')
+
+            if code_is_complete:
+                log_debug(
+                    "  [DEBUG] LLM hit MAX_TOKENS but returned complete source; "
+                    "keeping it for review/compiler validation."
+                )
+            else:
+                log_debug(
+                    "  [DEBUG] LLM hit MAX_TOKENS without complete source; "
+                    "retrying with a compact code-only prompt."
+                )
+                length_system = render_prompt(
+                    "retry_length_system",
+                    lang_name=lang['lang_name'],
+                    code_block_tag=lang['code_block_tag'],
+                )
+                length_user = render_prompt(
+                    "retry_length_user",
+                    lang_name=lang['lang_name'],
+                    code_block_tag=lang['code_block_tag'],
+                    args_name=lang['args_name'],
+                    previous_code=previous_code[:8000],
+                    diagnostic_info=diagnostic_info[:6000],
+                    ai_plan=ai_plan[:8000],
+                )
+                length_response = llm.invoke(
+                    [SystemMessage(content=length_system), HumanMessage(content=length_user)]
+                )
+                length_content = parse_literal_dict_content(
+                    normalize_model_content(length_response.content)
+                )
+                length_code = extract_code_from_content(length_content, target_language)
+                retry_content += "\n\n--- LENGTH RETRY ---\n" + length_content
+                length_finish = getattr(length_response, "response_metadata", {}).get(
+                    "finish_reason"
+                )
+                log_debug(
+                    f"  [DEBUG] Length retry finish_reason={length_finish}, "
+                    f"code_len={len(length_code)}"
+                )
+                code = length_code
+                if length_content:
+                    # Downstream refusal/fallback checks must evaluate the
+                    # retry that is now authoritative, not the empty initial
+                    # response.
+                    content = length_content
 
         implements_loader = code_implements_loader(code, target_language)
 
@@ -896,11 +948,16 @@ def execute_code(state: AgentState) -> AgentState:
         "stdout": result.stdout,
         "stderr": result.stderr,
         "runtime_seconds": result.runtime_seconds,
+        "process_id": result.process_id,
+        "crashed": result.crashed,
+        "error": result.error,
         "success_details": result.success_details,
     }
 
-    # Check strict shellcode success
-    if result.shellcode_success:
+    # A loader error is authoritative. Success criteria are accepted only when
+    # the loader itself completed without a non-zero exit or execution error.
+    loader_succeeded = result.success and not result.crashed and result.exit_code in (0, None)
+    if loader_succeeded and result.shellcode_success:
         return {"exec_result": exec_result_dict, "status": "executed"}
     else:
         return {"exec_result": exec_result_dict, "status": "exec_failed"}
@@ -913,19 +970,39 @@ def check_detections(state: AgentState) -> AgentState:
 
     # Load polling config
     elastic_config = config.get('detectors', {}).get('elastic', {})
-    max_checks = elastic_config.get('max_checks', 30)
-    check_interval = elastic_config.get('check_interval', 5)
+    max_checks = max(1, int(elastic_config.get('max_checks', 30)))
+    check_interval = max(0.0, float(elastic_config.get('check_interval', 5)))
+    configured_schedule = elastic_config.get('poll_schedule_seconds')
+    if configured_schedule is None:
+        poll_schedule = [i * check_interval for i in range(max_checks)]
+    else:
+        try:
+            poll_schedule = sorted({max(0.0, float(offset)) for offset in configured_schedule})
+        except (TypeError, ValueError):
+            print("Warning: Invalid Elastic poll_schedule_seconds; using max_checks/check_interval")
+            poll_schedule = [i * check_interval for i in range(max_checks)]
+        if not poll_schedule:
+            poll_schedule = [0.0]
 
     # Determine filename
     exe_path = state['compile_result']['output_path']
     process_name = os.path.basename(exe_path)
 
-    # Wait / Poll strategy
+    # Poll immediately, then at configured absolute offsets. This preserves a
+    # long final observation horizon without imposing that full delay when an
+    # alert is already available.
     found_detections: list[dict] = []
+    polling_started = time.monotonic()
 
-    # Check for (max_checks * check_interval) seconds total
-    for i in range(max_checks):
-        print(f"Checking detections iteration {i + 1}/{max_checks}...")
+    for i, scheduled_offset in enumerate(poll_schedule):
+        remaining_delay = scheduled_offset - (time.monotonic() - polling_started)
+        if remaining_delay > 0:
+            time.sleep(remaining_delay)
+
+        print(
+            f"Checking detections iteration {i + 1}/{len(poll_schedule)} "
+            f"(scheduled t+{scheduled_offset:g}s)..."
+        )
         for detector in detectors:
             if detector.is_available():
                 results = detector.check_detection(
@@ -940,8 +1017,6 @@ def check_detections(state: AgentState) -> AgentState:
         if found_detections:
             break
 
-        time.sleep(check_interval)
-
     if found_detections:
         return {"detections": found_detections, "status": "detected"}
 
@@ -949,7 +1024,7 @@ def check_detections(state: AgentState) -> AgentState:
     # for the run was met; otherwise preserve the prior status (e.g. exec_failed)
     # so we don't report a false "success" when the payload goal didn't happen.
     shellcode_success = (state.get('exec_result') or {}).get('shellcode_success', False)
-    if shellcode_success:
+    if state.get('status') == 'executed' and shellcode_success:
         return {"detections": [], "status": "clean"}
 
     return {"detections": [], "status": state.get("status", "unknown")}
@@ -1178,14 +1253,21 @@ def record_history(state: AgentState) -> AgentState:
     )
 
     bug_retries = state.get('bug_retries', 0)
+    max_bug_retries = max(1, int(state.get('max_bug_retries', 2)))
     if is_bug:
         bug_retries += 1
-        if bug_retries >= 5:
-            print("[!] Reached max bug retries (5). Forcing iteration increment to prevent infinite loop.")
+        if bug_retries >= max_bug_retries:
+            print(
+                f"[!] Reached max bug retries ({max_bug_retries}). "
+                "Forcing iteration increment to prevent infinite loop."
+            )
             next_iteration = state['iteration'] + 1
             bug_retries = 0
         else:
-            print(f"[*] Bug detected (retry {bug_retries}/5). Retrying without incrementing main iteration.")
+            print(
+                f"[*] Bug detected (retry {bug_retries}/{max_bug_retries}). "
+                "Retrying without incrementing main iteration."
+            )
             next_iteration = state['iteration']
     else:
         next_iteration = state['iteration'] + 1

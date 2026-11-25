@@ -14,7 +14,9 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.llm_factory import (  # noqa: E402
+    DEFAULT_MAX_RETRIES,
     DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
     OPENAI_COMPATIBLE_PLACEHOLDER_KEY,
     api_key_required,
     create_llm,
@@ -106,6 +108,25 @@ class TestOpenAICompatible(unittest.TestCase):
         cfg = make_config({"model": "m"})
         llm = create_llm(cfg)
         self.assertEqual(str(llm.openai_api_base), DEFAULT_OPENAI_COMPATIBLE_BASE_URL)
+
+    def test_request_controls_have_bounded_defaults(self):
+        llm = create_llm(make_config({"model": "m"}))
+        self.assertEqual(llm.request_timeout, DEFAULT_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(llm.max_retries, DEFAULT_MAX_RETRIES)
+
+    def test_provider_request_controls_override_global_values(self):
+        cfg = make_config({
+            "model": "m",
+            "request_timeout_seconds": 45,
+            "max_retries": 1,
+        })
+        cfg["ai"]["request_timeout_seconds"] = 90
+        cfg["ai"]["max_retries"] = 3
+
+        llm = create_llm(cfg)
+
+        self.assertEqual(llm.request_timeout, 45)
+        self.assertEqual(llm.max_retries, 1)
 
     def test_missing_model_raises(self):
         with self.assertRaises(ValueError) as ctx:

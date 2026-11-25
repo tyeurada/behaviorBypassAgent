@@ -1,0 +1,17 @@
+The previous response reached the completion-token limit. Regenerate it concisely.
+
+Target: {{ lang_name }}. Read the payload dynamically from {{ args_name }}.
+Preserve the current technique and apply the relevant detection fix. Remove comments, explanations, unused fallbacks, duplicate declarations, and other nonessential text.
+
+Detection context:
+{{ diagnostic_info }}
+
+Strategy to implement:
+{{ ai_plan }}
+
+Previous source, if useful:
+```{{ code_block_tag }}
+{{ previous_code }}
+```
+
+Return only the complete replacement source in one ```{{ code_block_tag }} block.

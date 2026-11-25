@@ -43,6 +43,8 @@ DEFAULT_MODELS = {
 
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://localhost:11434/v1"  # Ollama
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
+DEFAULT_MAX_RETRIES = 2
 
 # Sent when an openai_compatible endpoint has no API key configured. Local
 # servers (Ollama, LM Studio, llama.cpp) ignore the Authorization header.
@@ -116,6 +118,18 @@ def create_llm(config: dict):
     model = provider_cfg.get("model") or DEFAULT_MODELS[provider]
     temperature = provider_cfg.get("temperature", 0.7)
     max_tokens = provider_cfg.get("max_tokens")
+    request_timeout_seconds = provider_cfg.get(
+        "request_timeout_seconds",
+        ai_cfg.get("request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS),
+    )
+    max_retries = provider_cfg.get(
+        "max_retries",
+        ai_cfg.get("max_retries", DEFAULT_MAX_RETRIES),
+    )
+    request_controls = {
+        "timeout": request_timeout_seconds,
+        "max_retries": max_retries,
+    }
 
     if provider == "gemini":
         try:
@@ -128,6 +142,7 @@ def create_llm(config: dict):
             "temperature": temperature,
             "top_p": provider_cfg.get("top_p", 0.9),
             "safety_settings": _gemini_safety_settings(),
+            **request_controls,
         }
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
@@ -138,7 +153,12 @@ def create_llm(config: dict):
             from langchain_openai import ChatOpenAI
         except ImportError as e:
             raise ImportError("langchain-openai is required for provider 'openai'") from e
-        kwargs = {"model": model, "api_key": api_key, "temperature": temperature}
+        kwargs = {
+            "model": model,
+            "api_key": api_key,
+            "temperature": temperature,
+            **request_controls,
+        }
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
         return ChatOpenAI(**kwargs)
@@ -154,6 +174,7 @@ def create_llm(config: dict):
             "temperature": temperature,
             # Anthropic requires an explicit max_tokens; default generously.
             "max_tokens": max_tokens or 8192,
+            **request_controls,
         }
         return ChatAnthropic(**kwargs)
 
@@ -167,6 +188,7 @@ def create_llm(config: dict):
             "api_key": api_key,
             "base_url": provider_cfg.get("base_url") or DEFAULT_DEEPSEEK_BASE_URL,
             "temperature": temperature,
+            **request_controls,
         }
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
@@ -188,6 +210,7 @@ def create_llm(config: dict):
             "api_key": api_key or OPENAI_COMPATIBLE_PLACEHOLDER_KEY,
             "base_url": provider_cfg.get("base_url") or DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
             "temperature": temperature,
+            **request_controls,
         }
         if max_tokens:
             kwargs["max_tokens"] = max_tokens

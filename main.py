@@ -142,6 +142,7 @@ def main():
         "error": None,
         "session_dir": session_dir,
         "bug_retries": 0,
+        "max_bug_retries": max(1, int(cfg.get("execution", {}).get("max_bug_retries", 2))),
         # New Memory Fields
         "approach_tracker": [],
         "iteration_summaries": [],

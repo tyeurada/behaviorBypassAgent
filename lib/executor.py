@@ -1,11 +1,13 @@
 """Executor module for running compiled loaders."""
 
+import csv
+import ctypes
 import os
 import subprocess
 import time
+from ctypes import wintypes
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
-from pathlib import Path
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -44,7 +46,11 @@ class Executor:
         self.success_type = success_config.get('type', 'none')
         self.success_config = success_config
     
-    def check_success_criteria(self) -> tuple:
+    def check_success_criteria(
+        self,
+        process_baseline: Optional[Dict[int, float]] = None,
+        process_started_after: Optional[float] = None,
+    ) -> tuple:
         """Check if shellcode execution was successful based on criteria.
         
         Returns:
@@ -54,7 +60,7 @@ class Executor:
             return (True, {'note': 'No success criteria configured'})
         
         if self.success_type == 'process':
-            return self._check_process_success()
+            return self._check_process_success(process_baseline, process_started_after)
         elif self.success_type == 'file':
             return self._check_file_success()
         elif self.success_type == 'network':
@@ -62,10 +68,65 @@ class Executor:
         
         return (True, {'note': 'Unknown success type'})
     
-    def _check_process_success_once(self, process_name: str) -> bool:
-        """Single check if process is in tasklist. Returns True if found."""
+    def _get_process_start_time(self, pid: int) -> Optional[float]:
+        """Return a Windows process creation time as Unix seconds."""
+        if os.name != 'nt':
+            return None
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        EPOCH_AS_FILETIME = 116444736000000000
+        HUNDREDS_OF_NS = 10000000
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        try:
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            ):
+                return None
+        finally:
+            kernel32.CloseHandle(handle)
+
+        creation_ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        return (creation_ticks - EPOCH_AS_FILETIME) / HUNDREDS_OF_NS
+
+    def _list_matching_processes(self, process_name: str) -> Dict[int, float]:
+        """Return {pid: creation_time} for exact executable-name matches.
+
+        Processes whose creation time cannot be read are deliberately excluded so
+        a process success criterion cannot silently degrade to a global name-only
+        check.
+        """
         if not process_name:
-            return False
+            return {}
         try:
             result = subprocess.run(
                 ['tasklist', '/FI', f'IMAGENAME eq {process_name}', '/FO', 'CSV', '/NH'],
@@ -73,11 +134,43 @@ class Executor:
                 text=True,
                 timeout=5
             )
-            return process_name.lower() in result.stdout.lower()
+            processes = {}
+            for row in csv.reader(result.stdout.splitlines()):
+                if len(row) < 2 or row[0].lower() != process_name.lower():
+                    continue
+                try:
+                    pid = int(row[1].replace(',', ''))
+                except ValueError:
+                    continue
+                started_at = self._get_process_start_time(pid)
+                if started_at is not None:
+                    processes[pid] = started_at
+            return processes
         except Exception:
-            return False
+            return {}
 
-    def _check_process_success(self) -> tuple:
+    def _check_process_success_once(
+        self,
+        process_name: str,
+        process_baseline: Dict[int, float],
+        process_started_after: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a process created by the current execution, if present."""
+        for pid, started_at in self._list_matching_processes(process_name).items():
+            baseline_started_at = process_baseline.get(pid)
+            is_baseline_identity = (
+                baseline_started_at is not None
+                and abs(baseline_started_at - started_at) < 0.001
+            )
+            if not is_baseline_identity and started_at >= process_started_after:
+                return {'process_id': pid, 'process_start_time': started_at}
+        return None
+
+    def _check_process_success(
+        self,
+        process_baseline: Optional[Dict[int, float]],
+        process_started_after: Optional[float],
+    ) -> tuple:
         """Check if expected process was spawned."""
         process_config = self.success_config.get('process', {})
         process_name = process_config.get('name', '')
@@ -85,14 +178,31 @@ class Executor:
         
         if not process_name:
             return (True, {'note': 'No process name configured'})
+
+        if process_started_after is None:
+            return (False, {
+                'process_expected': process_name,
+                'message': 'Process success could not be correlated to this execution'
+            })
+
+        process_baseline = process_baseline or {}
         
         # Check for process multiple times within timeout
         start_time = time.time()
         while time.time() - start_time < timeout:
-            if self._check_process_success_once(process_name):
+            match = self._check_process_success_once(
+                process_name,
+                process_baseline,
+                process_started_after,
+            )
+            if match:
                 return (True, {
                     'process_found': process_name,
-                    'message': f'Process {process_name} was spawned successfully'
+                    **match,
+                    'message': (
+                        f'Process {process_name} was created during the current execution '
+                        f'(PID {match["process_id"]})'
+                    )
                 })
             time.sleep(0.5)
         
@@ -215,10 +325,6 @@ class Executor:
                 
                 runtime = time.time() - start_time
                 
-                # Wait for detectors to update
-                if wait_for_detectors and self.wait_after_execute > 0:
-                    time.sleep(self.wait_after_execute)
-                
                 # Record crash information
                 if crashed and not stderr and exit_code is not None:
                     hex_code = f"0x{exit_code & 0xFFFFFFFF:08X}"
@@ -240,9 +346,6 @@ class Executor:
                 stdout, stderr = process.communicate()
                 
                 runtime = time.time() - start_time
-                
-                if wait_for_detectors and self.wait_after_execute > 0:
-                    time.sleep(self.wait_after_execute)
                 
                 return ExecutionResult(
                     success=True,  # Timeout might be expected behavior
@@ -313,6 +416,18 @@ class Executor:
         print(f"  Command:    {' '.join(cmd_list)}")
         print(f"  Working dir: {os.path.dirname(exe_path)}")
 
+        process_config = self.success_config.get('process', {})
+        network_config = self.success_config.get('network', {})
+        success_process_name = process_config.get('name', '') if self.success_type == 'process' else ''
+        success_network_host = (network_config.get('host') or '').strip() if self.success_type == 'network' else ''
+        success_network_port = int(network_config.get('port') or 0) if self.success_type == 'network' else 0
+
+        # Snapshot identities, not just names. A process that existed before this
+        # loader run must not satisfy this run's process success criterion.
+        process_baseline = (
+            self._list_matching_processes(success_process_name)
+            if success_process_name else {}
+        )
         start_time = time.time()
         shellcode_success = False
         success_details = {'message': 'Success criteria not checked'}
@@ -330,11 +445,6 @@ class Executor:
             print(f"  Process started: PID={pid}")
 
             # Poll for success criteria *while* loader is running (process or network).
-            process_config = self.success_config.get('process', {})
-            network_config = self.success_config.get('network', {})
-            success_process_name = process_config.get('name', '') if self.success_type == 'process' else ''
-            success_network_host = (network_config.get('host') or '').strip() if self.success_type == 'network' else ''
-            success_network_port = int(network_config.get('port') or 0) if self.success_type == 'network' else 0
             success_timeout = (
                 process_config.get('timeout', 15) if self.success_type == 'process'
                 else int(network_config.get('timeout', 15))
@@ -342,15 +452,23 @@ class Executor:
             poll_end = time.time() + success_timeout
 
             while time.time() < poll_end:
-                if process.poll() is not None:
-                    break  # loader already exited
-                if self.success_type == 'process' and success_process_name and self._check_process_success_once(success_process_name):
-                    shellcode_success = True
-                    success_details = {
-                        'process_found': success_process_name,
-                        'message': f'Process {success_process_name} was spawned successfully'
-                    }
-                    break
+                if self.success_type == 'process' and success_process_name:
+                    match = self._check_process_success_once(
+                        success_process_name,
+                        process_baseline,
+                        start_time,
+                    )
+                    if match:
+                        shellcode_success = True
+                        success_details = {
+                            'process_found': success_process_name,
+                            **match,
+                            'message': (
+                                f'Process {success_process_name} was created during the '
+                                f'current execution (PID {match["process_id"]})'
+                            )
+                        }
+                        break
                 if self.success_type == 'network' and success_network_host and success_network_port and self._check_network_success_once(success_network_host, success_network_port):
                     shellcode_success = True
                     success_details = {
@@ -358,6 +476,8 @@ class Executor:
                         'message': f'Connection to {success_network_host}:{success_network_port} (ESTABLISHED)'
                     }
                     break
+                if process.poll() is not None:
+                    break  # loader already exited and no correlated success was found
                 time.sleep(0.5)
 
             try:
@@ -379,11 +499,23 @@ class Executor:
 
             # If we didn't find success process during the poll, check once more
             # (e.g. calc appeared right as loader exited)
-            if not shellcode_success and (self.success_enabled and self.success_type != 'none'):
-                shellcode_success, success_details = self.check_success_criteria()
+            if not crashed and not shellcode_success and (self.success_enabled and self.success_type != 'none'):
+                shellcode_success, success_details = self.check_success_criteria(
+                    process_baseline=process_baseline,
+                    process_started_after=start_time,
+                )
 
-            if self.wait_after_execute > 0:
-                time.sleep(self.wait_after_execute)
+            # A non-zero exit is authoritative: the loader did not complete
+            # successfully, even if a success artifact was observed concurrently.
+            if crashed:
+                ignored_observation = success_details if shellcode_success else None
+                shellcode_success = False
+                success_details = {
+                    'loader_exit_code': exit_code,
+                    'message': f'Loader exited with code {exit_code}; success criteria rejected'
+                }
+                if ignored_observation:
+                    success_details['ignored_success_observation'] = ignored_observation
 
             return ExecutionResult(
                 success=exit_code == 0 or exit_code is None,
@@ -402,7 +534,7 @@ class Executor:
                 success=False,
                 runtime_seconds=time.time() - start_time,
                 error=str(e),
-                shellcode_success=shellcode_success,
+                shellcode_success=False,
                 success_details=success_details
             )
     

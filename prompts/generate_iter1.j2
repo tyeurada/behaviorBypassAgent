@@ -44,22 +44,19 @@ The following techniques are available in your arsenal. You are not forced to us
 {% endif %}
 
 ## Output Format
-Provide your response in this format:
-
-### EXPLANATION
-Step-by-step reasoning for your changes:
-1. Analyze the failure/detection (what specifically triggered it?)
-2. Explain the new evasion strategy (why will this bypass the specific rule/error?)
-3. List the techniques selected and why
-
-### TECHNIQUES_USED
-- Technique1
-- Technique2
+Put the complete code first so it is not lost if the provider reaches its completion limit. Keep all prose after the code under 100 words.
 
 ### CODE
 ```{{ code_block_tag }}
 {{ comment_prefix }} Your complete, compilable {{ lang_name }} code here
 ```
+
+### TECHNIQUES_USED
+- Technique1
+- Technique2
+
+### EXPLANATION
+[Concise strategy summary]
 
 Make sure the code:
 1. Is complete and ready to execute or compile on Windows

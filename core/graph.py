@@ -53,19 +53,9 @@ def create_graph():
 
     workflow.add_conditional_edges("compile", route_compile, {"execute": "execute", "analyze": "analyze"})
 
-    # Execute Logic
-    def route_execute(state):
-        # Deep analysis of failures happens in 'analyze' node, which 'detect' feeds into.
-        # This ensures we catch EDR alerts even if the process failed criteria.
-        # However, if it crashed completely (Python syntax, compilation-like runtime error),
-        # the payload never ran successfully, so we can skip the slow 150s EDR detection polling.
-        exec_result = state.get('exec_result', {})
-        if state['status'] == 'exec_failed' and exec_result.get('crashed', False):
-            print("[*] Execution crashed. Bypassing detection polling to save time.")
-            return "analyze"
-        return "detect"
-
-    workflow.add_conditional_edges("execute", route_execute, {"detect": "detect", "analyze": "analyze"})
+    # EDR prevention commonly terminates a loader, so a non-zero exit can itself
+    # be evidence of detection. Always poll before classifying the execution.
+    workflow.add_edge("execute", "detect")
 
     # Detect Logic
     workflow.add_edge("detect", "analyze")
